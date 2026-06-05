@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "host": {
+    "hostname": "debian-edge-01",
+    "managementCIDRs": ["192.168.88.0/24"],
+    "enableIPForward": true,
+    "conntrackMax": 262144
+  },
+  "ui": {
+    "listen": "127.0.0.1:8088",
+    "adminUsername": "admin",
+    "tlsCertFile": "",
+    "tlsKeyFile": ""
+  },
+  "interfaces": [
+    {
+      "name": "enp1s0",
+      "role": "wan",
+      "enabled": true,
+      "addresses": ["dhcp"],
+      "gateway": "",
+      "dns": ["1.1.1.1", "9.9.9.9"],
+      "mtu": 1500,
+      "masquerade": true
+    },
+    {
+      "name": "enp2s0",
+      "role": "lan",
+      "enabled": true,
+      "addresses": ["192.168.88.1/24"],
+      "gateway": "",
+      "dns": [],
+      "mtu": 1500,
+      "masquerade": false,
+      "dhcpServer": {
+        "rangeStart": "192.168.88.50",
+        "rangeEnd": "192.168.88.250",
+        "leaseTime": "12h",
+        "dns": ["192.168.88.1"],
+        "domain": "lan"
+      }
+    }
+  ],
+  "tunnels": [
+    {
+      "id": "wg-office",
+      "name": "Office WireGuard",
+      "type": "wireguard",
+      "enabled": true,
+      "interfaceName": "wg-office",
+      "mark": 4097,
+      "table": 101,
+      "mtu": 1420,
+      "remoteEndpoint": "vpn.example.com:51820",
+      "localAddresses": ["10.60.0.2/32"],
+      "dns": ["10.60.0.1"],
+      "credentials": {
+        "configFile": "/etc/debian-router/wireguard/wg-office.conf"
+      },
+      "options": {
+        "healthcheck": "1.1.1.1"
+      }
+    },
+    {
+      "id": "xray-global",
+      "name": "Global VLESS/XHTTP",
+      "type": "vless-xhttp",
+      "enabled": false,
+      "interfaceName": "tun-xray0",
+      "mark": 4098,
+      "table": 102,
+      "mtu": 9000,
+      "remoteEndpoint": "example.net:443",
+      "localAddresses": ["172.30.20.2/30"],
+      "dns": ["1.1.1.1"],
+      "credentials": {
+        "configFile": "/etc/debian-router/xray/xray-global.json"
+      },
+      "options": {
+        "engine": "xray",
+        "transport": "xhttp",
+        "sni": "example.net"
+      }
+    }
+  ],
+  "routing": {
+    "defaultPolicy": "wan",
+    "staticRoutes": [
+      {
+        "destination": "10.20.0.0/16",
+        "gateway": "",
+        "interface": "wg-office",
+        "table": 101,
+        "metric": 10
+      }
+    ],
+    "rules": [
+      {
+        "id": "work-subnets-via-wg",
+        "name": "Work networks through WireGuard",
+        "enabled": true,
+        "priority": 100,
+        "match": {
+          "inputIface": "enp2s0",
+          "sourceCIDRs": ["192.168.88.0/24"],
+          "destinationCIDRs": ["10.20.0.0/16"],
+          "sourcePorts": [],
+          "destinationPorts": [],
+          "protocols": ["tcp", "udp"],
+          "tunnelIDs": [],
+          "domains": [],
+          "geoIP": []
+        },
+        "action": {
+          "type": "tunnel",
+          "target": "wg-office",
+          "nat": false,
+          "log": true,
+          "mark": 4097,
+          "table": 101
+        }
+      },
+      {
+        "id": "guest-block-rfc1918",
+        "name": "Block guest access to private networks",
+        "enabled": true,
+        "priority": 200,
+        "match": {
+          "inputIface": "enp2s0",
+          "sourceCIDRs": ["192.168.88.128/25"],
+          "destinationCIDRs": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
+          "sourcePorts": [],
+          "destinationPorts": [],
+          "protocols": [],
+          "tunnelIDs": [],
+          "domains": [],
+          "geoIP": []
+        },
+        "action": {
+          "type": "reject",
+          "target": "",
+          "nat": false,
+          "log": true,
+          "mark": 0,
+          "table": 0
+        }
+      }
+    ]
+  },
+  "security": {
+    "nat": true,
+    "firewall": true,
+    "allowEstablished": true,
+    "managementPorts": [22, 8088],
+    "antivirus": {
+      "enabled": false,
+      "mode": "icap",
+      "interfaces": ["enp2s0"],
+      "maxFileSizeMB": 100,
+      "quarantineDir": "/var/lib/debian-router/quarantine"
+    },
+    "ips": {
+      "enabled": false,
+      "engine": "suricata",
+      "mode": "af-packet",
+      "interfaces": ["enp1s0", "enp2s0"],
+      "nfqueue": 0
+    },
+    "dnsFiltering": {
+      "enabled": false,
+      "upstream": ["1.1.1.1", "9.9.9.9"],
+      "blocklists": []
+    }
+  }
+}
+

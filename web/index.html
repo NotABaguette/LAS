@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Debian Router</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="grain"></div>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">DR</div>
+          <div>
+            <h1>Debian Router</h1>
+            <p>Policy router control plane</p>
+          </div>
+        </div>
+        <nav class="nav" aria-label="Router sections">
+          <button class="nav-item active" data-tab="dashboard">Dashboard</button>
+          <button class="nav-item" data-tab="interfaces">Interfaces</button>
+          <button class="nav-item" data-tab="tunnels">Tunnels</button>
+          <button class="nav-item" data-tab="rules">Rules</button>
+          <button class="nav-item" data-tab="security">Security</button>
+          <button class="nav-item" data-tab="raw">Raw Config</button>
+        </nav>
+        <div class="sidebar-note">
+          <strong>Safe by default.</strong>
+          <span>Apply runs as dry-run unless the daemon starts with <code>--apply</code>.</span>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Router appliance</p>
+            <h2 id="page-title">Dashboard</h2>
+          </div>
+          <div class="action-row">
+            <button class="ghost" id="reload">Reload</button>
+            <button class="ghost" id="preview">Preview Plan</button>
+            <button class="primary" id="save">Save Config</button>
+            <button class="danger" id="apply">Apply</button>
+          </div>
+        </header>
+
+        <section id="notice" class="notice hidden" role="status"></section>
+        <section id="content" class="content"></section>
+        <section class="drawer">
+          <div class="drawer-header">
+            <h3>Plan / Results</h3>
+            <button class="ghost compact" id="clear-output">Clear</button>
+          </div>
+          <pre id="output">No plan generated yet.</pre>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
+

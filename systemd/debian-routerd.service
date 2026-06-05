@@ -1,0 +1,22 @@
+[Unit]
+Description=Debian Router Control Plane
+Documentation=file:/usr/share/debian-router/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/debian-routerd --config /etc/debian-router/router.json --web-dir /usr/share/debian-router/web --apply
+Restart=on-failure
+RestartSec=3s
+User=root
+Group=root
+NoNewPrivileges=false
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/etc/debian-router /run/debian-router /var/lib/debian-router
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+

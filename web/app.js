@@ -15,6 +15,7 @@ const titles = {
   tunnels: "Tunnels",
   rules: "Policy Rules",
   services: "Services",
+  platform: "Platform",
   security: "Security",
   diagnostics: "Diagnostics",
   raw: "Raw Config",
@@ -55,6 +56,7 @@ function render() {
     tunnels: renderTunnels,
     rules: renderRules,
     services: renderServices,
+    platform: renderPlatform,
     security: renderSecurity,
     diagnostics: renderDiagnostics,
     raw: renderRaw,
@@ -387,10 +389,54 @@ function renderServices() {
   return root;
 }
 
+function renderPlatform() {
+  const root = el("div", "grid");
+  const platform = state.config.platform || (state.config.platform = {});
+  const summary = card("RouterOS-Class Platform Features", "full");
+  summary.append(el("p", "muted", "Configure L2 switching, VLANs, bridges, bonds, VRRP, VRF, BGP/OSPF/RIP/BFD, QoS queues, SNMP, NetFlow, traffic graphs, audit logging, rollback watchdogs, scheduled jobs, backups, and access/RBAC hooks."));
+  summary.append(el("div", "pill-row"));
+  const pills = summary.querySelector(".pill-row");
+  [
+    `VLANs ${(platform.l2?.vlans || []).length}`,
+    `Bridges ${(platform.l2?.bridges || []).length}`,
+    `Bonds ${(platform.l2?.bonds || []).length}`,
+    `VRFs ${(platform.dynamicRouting?.vrfs || []).length}`,
+    `QoS ${(platform.qos?.queues || []).length}`,
+    `Jobs ${(platform.automation?.scheduler || []).length}`,
+  ].forEach((text) => pills.append(el("span", "pill", text)));
+  root.append(summary);
+
+  const editor = card("Platform JSON", "full");
+  const textarea = el("textarea", "raw-editor");
+  textarea.value = JSON.stringify(platform, null, 2);
+  editor.append(textarea);
+  editor.append(actions([
+    ["Load Platform JSON", () => {
+      try {
+        state.config.platform = JSON.parse(textarea.value);
+        message("Platform config loaded into UI state. Save to persist it.");
+        render();
+      } catch (error) {
+        message(error.message, true);
+      }
+    }],
+    ["Format", () => {
+      try {
+        textarea.value = JSON.stringify(JSON.parse(textarea.value), null, 2);
+      } catch (error) {
+        message(error.message, true);
+      }
+    }],
+  ]));
+  root.append(editor);
+  return root;
+}
+
 function renderSecurity() {
   const sec = state.config.security;
   const root = el("div", "grid");
   sec.portForwards = sec.portForwards || [];
+  sec.oneToOneNat = sec.oneToOneNat || [];
 
   const base = card("Firewall and NAT", "full");
   base.append(formGrid([
@@ -435,6 +481,33 @@ function renderSecurity() {
     render();
   }]]));
   root.append(forwards);
+
+  const oneToOne = card("1:1 NAT / Netmap", "full");
+  sec.oneToOneNat.forEach((nat, index) => {
+    const row = el("div", "card full");
+    row.append(formGrid([
+      textField("ID", nat.id, (value) => nat.id = value),
+      checkboxField("Enabled", nat.enabled, (value) => nat.enabled = value),
+      textField("Internal CIDR", nat.internalCidr, (value) => nat.internalCidr = value),
+      textField("External CIDR", nat.externalCidr, (value) => nat.externalCidr = value),
+      listField("Interfaces", nat.interfaces, (value) => nat.interfaces = value),
+      checkboxField("Log", nat.log, (value) => nat.log = value),
+    ]));
+    row.append(actions([["Remove 1:1 NAT", () => removeAt(sec.oneToOneNat, index), "danger"]]));
+    oneToOne.append(row);
+  });
+  oneToOne.append(actions([["Add 1:1 NAT", () => {
+    sec.oneToOneNat.push({
+      id: `nat-${sec.oneToOneNat.length + 1}`,
+      enabled: true,
+      internalCidr: "192.168.88.20/32",
+      externalCidr: "203.0.113.20/32",
+      interfaces: ["enp1s0"],
+      log: true,
+    });
+    render();
+  }]]));
+  root.append(oneToOne);
 
   const ips = card("IPS", "third");
   ips.append(formGrid([

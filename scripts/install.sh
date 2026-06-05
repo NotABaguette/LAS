@@ -24,11 +24,18 @@ apt-get install -y \
   strongswan \
   xl2tpd \
   frr \
+  keepalived \
   suricata \
   clamav-daemon \
   clamav-freshclam \
   dnsmasq \
   chrony \
+  snmpd \
+  softflowd \
+  prometheus-node-exporter \
+  miniupnpd \
+  opennds \
+  freeradius \
   traceroute \
   dnsutils \
   iputils-ping \

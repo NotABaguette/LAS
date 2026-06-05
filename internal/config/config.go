@@ -18,6 +18,7 @@ type Config struct {
 	Tunnels    []Tunnel       `json:"tunnels"`
 	Routing    RoutingConfig  `json:"routing"`
 	Services   ServicesConfig `json:"services"`
+	Platform   PlatformConfig `json:"platform"`
 	Security   SecurityConfig `json:"security"`
 }
 
@@ -164,9 +165,14 @@ type SecurityConfig struct {
 	AllowEstablished bool             `json:"allowEstablished"`
 	ManagementPorts  []int            `json:"managementPorts"`
 	PortForwards     []PortForward    `json:"portForwards"`
+	OneToOneNAT      []OneToOneNAT    `json:"oneToOneNat"`
 	Antivirus        AntivirusConfig  `json:"antivirus"`
 	IPS              IPSConfig        `json:"ips"`
 	DNSFiltering     DNSFilteringConf `json:"dnsFiltering"`
+	ThreatFeeds      ThreatFeedConfig `json:"threatFeeds"`
+	CaptivePortal    CaptivePortal    `json:"captivePortal"`
+	RADIUS           RADIUSConfig     `json:"radius"`
+	UPnP             UPnPConfig       `json:"upnp"`
 }
 
 type ServicesConfig struct {
@@ -222,6 +228,211 @@ type MPLSConfig struct {
 	VRF        string   `json:"vrf"`
 }
 
+type PlatformConfig struct {
+	L2         L2Config         `json:"l2"`
+	Routing    DynamicRouting   `json:"dynamicRouting"`
+	QoS        QoSConfig        `json:"qos"`
+	Monitor    MonitoringConfig `json:"monitoring"`
+	Automation AutomationConfig `json:"automation"`
+	Access     AccessConfig     `json:"access"`
+}
+
+type L2Config struct {
+	VLANs   []VLAN   `json:"vlans"`
+	Bridges []Bridge `json:"bridges"`
+	Bonds   []Bond   `json:"bonds"`
+	VRRP    []VRRP   `json:"vrrp"`
+}
+
+type VLAN struct {
+	Name   string   `json:"name"`
+	Parent string   `json:"parent"`
+	ID     int      `json:"id"`
+	MTU    int      `json:"mtu"`
+	Role   string   `json:"role"`
+	IPs    []string `json:"ips"`
+}
+
+type Bridge struct {
+	Name        string   `json:"name"`
+	Members     []string `json:"members"`
+	STP         bool     `json:"stp"`
+	VLANAware   bool     `json:"vlanAware"`
+	VLANs       []int    `json:"vlans"`
+	MTU         int      `json:"mtu"`
+	Description string   `json:"description"`
+}
+
+type Bond struct {
+	Name    string   `json:"name"`
+	Members []string `json:"members"`
+	Mode    string   `json:"mode"`
+	LACP    string   `json:"lacp"`
+	MTU     int      `json:"mtu"`
+}
+
+type VRRP struct {
+	ID        string   `json:"id"`
+	Interface string   `json:"interface"`
+	VRID      int      `json:"vrid"`
+	Priority  int      `json:"priority"`
+	VIPs      []string `json:"vips"`
+	Preempt   bool     `json:"preempt"`
+}
+
+type DynamicRouting struct {
+	VRFs      []VRF      `json:"vrfs"`
+	BGP       BGPConfig  `json:"bgp"`
+	OSPF      OSPFConfig `json:"ospf"`
+	RIP       RIPConfig  `json:"rip"`
+	BFD       BFDConfig  `json:"bfd"`
+	RouteMaps []RouteMap `json:"routeMaps"`
+}
+
+type VRF struct {
+	Name       string   `json:"name"`
+	Table      int      `json:"table"`
+	Interfaces []string `json:"interfaces"`
+}
+
+type BGPConfig struct {
+	Enabled  bool          `json:"enabled"`
+	ASN      int           `json:"asn"`
+	RouterID string        `json:"routerId"`
+	Networks []string      `json:"networks"`
+	Peers    []RoutingPeer `json:"peers"`
+}
+
+type OSPFConfig struct {
+	Enabled  bool     `json:"enabled"`
+	RouterID string   `json:"routerId"`
+	Networks []string `json:"networks"`
+}
+
+type RIPConfig struct {
+	Enabled  bool     `json:"enabled"`
+	Networks []string `json:"networks"`
+}
+
+type BFDConfig struct {
+	Enabled bool          `json:"enabled"`
+	Peers   []RoutingPeer `json:"peers"`
+}
+
+type RoutingPeer struct {
+	Name        string `json:"name"`
+	Address     string `json:"address"`
+	RemoteASN   int    `json:"remoteAsn"`
+	Password    string `json:"password"`
+	Interface   string `json:"interface"`
+	Multihop    int    `json:"multihop"`
+	RouteMapIn  string `json:"routeMapIn"`
+	RouteMapOut string `json:"routeMapOut"`
+}
+
+type RouteMap struct {
+	Name     string   `json:"name"`
+	Sequence int      `json:"sequence"`
+	Action   string   `json:"action"`
+	Matches  []string `json:"matches"`
+	Sets     []string `json:"sets"`
+}
+
+type QoSConfig struct {
+	Enabled bool       `json:"enabled"`
+	Queues  []QoSQueue `json:"queues"`
+}
+
+type QoSQueue struct {
+	ID        string `json:"id"`
+	Interface string `json:"interface"`
+	Kind      string `json:"kind"`
+	Rate      string `json:"rate"`
+	Ceil      string `json:"ceil"`
+	Priority  int    `json:"priority"`
+	MatchMark int    `json:"matchMark"`
+}
+
+type MonitoringConfig struct {
+	SNMP          SNMPConfig          `json:"snmp"`
+	NetFlow       NetFlowConfig       `json:"netflow"`
+	TrafficGraphs TrafficGraphsConfig `json:"trafficGraphs"`
+}
+
+type SNMPConfig struct {
+	Enabled   bool   `json:"enabled"`
+	Community string `json:"community"`
+	Listen    string `json:"listen"`
+	Location  string `json:"location"`
+	Contact   string `json:"contact"`
+}
+
+type NetFlowConfig struct {
+	Enabled    bool     `json:"enabled"`
+	Engine     string   `json:"engine"`
+	Collector  string   `json:"collector"`
+	Port       int      `json:"port"`
+	Interfaces []string `json:"interfaces"`
+}
+
+type TrafficGraphsConfig struct {
+	Enabled bool   `json:"enabled"`
+	Engine  string `json:"engine"`
+	Listen  string `json:"listen"`
+}
+
+type AutomationConfig struct {
+	AuditLog         AuditLogConfig   `json:"auditLog"`
+	RollbackWatchdog RollbackWatchdog `json:"rollbackWatchdog"`
+	Scheduler        []ScheduledJob   `json:"scheduler"`
+	Backup           BackupConfig     `json:"backup"`
+}
+
+type AuditLogConfig struct {
+	Enabled bool   `json:"enabled"`
+	Path    string `json:"path"`
+}
+
+type RollbackWatchdog struct {
+	Enabled      bool   `json:"enabled"`
+	ProbeTarget  string `json:"probeTarget"`
+	Timeout      string `json:"timeout"`
+	RecoveryPath string `json:"recoveryPath"`
+}
+
+type ScheduledJob struct {
+	ID       string `json:"id"`
+	Enabled  bool   `json:"enabled"`
+	Schedule string `json:"schedule"`
+	Command  string `json:"command"`
+}
+
+type BackupConfig struct {
+	Enabled     bool   `json:"enabled"`
+	Schedule    string `json:"schedule"`
+	Destination string `json:"destination"`
+	Encrypt     bool   `json:"encrypt"`
+}
+
+type AccessConfig struct {
+	AuthEnabled bool   `json:"authEnabled"`
+	SessionTTL  string `json:"sessionTtl"`
+	Users       []User `json:"users"`
+	Roles       []Role `json:"roles"`
+}
+
+type User struct {
+	Username     string   `json:"username"`
+	PasswordHash string   `json:"passwordHash"`
+	Roles        []string `json:"roles"`
+	Disabled     bool     `json:"disabled"`
+}
+
+type Role struct {
+	Name        string   `json:"name"`
+	Permissions []string `json:"permissions"`
+}
+
 type PortForward struct {
 	ID           string   `json:"id"`
 	Name         string   `json:"name"`
@@ -232,6 +443,15 @@ type PortForward struct {
 	InternalIP   string   `json:"internalIp"`
 	InternalPort int      `json:"internalPort"`
 	SourceCIDRs  []string `json:"sourceCIDRs"`
+	Log          bool     `json:"log"`
+}
+
+type OneToOneNAT struct {
+	ID           string   `json:"id"`
+	Enabled      bool     `json:"enabled"`
+	InternalCIDR string   `json:"internalCidr"`
+	ExternalCIDR string   `json:"externalCidr"`
+	Interfaces   []string `json:"interfaces"`
 	Log          bool     `json:"log"`
 }
 
@@ -255,6 +475,34 @@ type DNSFilteringConf struct {
 	Enabled    bool     `json:"enabled"`
 	Upstream   []string `json:"upstream"`
 	Blocklists []string `json:"blocklists"`
+}
+
+type ThreatFeedConfig struct {
+	Enabled    bool     `json:"enabled"`
+	SourceURLs []string `json:"sourceUrls"`
+	Refresh    string   `json:"refresh"`
+	Action     string   `json:"action"`
+}
+
+type CaptivePortal struct {
+	Enabled    bool     `json:"enabled"`
+	Engine     string   `json:"engine"`
+	Interfaces []string `json:"interfaces"`
+	LoginURL   string   `json:"loginUrl"`
+	RADIUS     bool     `json:"radius"`
+}
+
+type RADIUSConfig struct {
+	Enabled bool     `json:"enabled"`
+	Servers []string `json:"servers"`
+	Secret  string   `json:"secret"`
+	NASID   string   `json:"nasId"`
+}
+
+type UPnPConfig struct {
+	Enabled        bool     `json:"enabled"`
+	InternalIfaces []string `json:"internalIfaces"`
+	ExternalIface  string   `json:"externalIface"`
 }
 
 func Default() Config {
@@ -310,12 +558,25 @@ func Default() Config {
 			NTPServer: NTPServiceConfig{Engine: "chrony", Listen: []string{"enp2s0"}},
 			NTPClient: NTPClientConfig{Enabled: true, Servers: []string{"pool.ntp.org"}},
 		},
+		Platform: PlatformConfig{
+			Access: AccessConfig{
+				SessionTTL: "12h",
+				Roles: []Role{
+					{Name: "admin", Permissions: []string{"*"}},
+					{Name: "viewer", Permissions: []string{"read:*"}},
+				},
+			},
+			Automation: AutomationConfig{
+				AuditLog: AuditLogConfig{Enabled: true, Path: "/var/log/las/audit.log"},
+			},
+		},
 		Security: SecurityConfig{
 			NAT:              true,
 			Firewall:         true,
 			AllowEstablished: true,
 			ManagementPorts:  []int{22, 8088},
 			PortForwards:     []PortForward{},
+			OneToOneNAT:      []OneToOneNAT{},
 			Antivirus: AntivirusConfig{
 				Mode:          "icap",
 				MaxFileSizeMB: 100,

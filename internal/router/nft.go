@@ -18,10 +18,10 @@ func BuildNftables(cfg config.Config) (string, []string) {
 	b.WriteString("table inet las_router {\n")
 	writeRouteSets(&b, cfg.Routing.Sets, &warnings)
 	writeInputChain(&b, cfg)
-	writeDstNATChain(&b, cfg)
+	writeDstNATChain(&b, cfg, &warnings)
 	writePreroutingChain(&b, cfg, &warnings)
 	writeForwardChain(&b, cfg, &warnings)
-	writePostroutingChain(&b, cfg)
+	writePostroutingChain(&b, cfg, &warnings)
 	b.WriteString("}\n")
 
 	return b.String(), warnings
@@ -45,11 +45,28 @@ func writeRouteSets(b *strings.Builder, sets []config.RouteSet, warnings *[]stri
 	}
 }
 
-func writeDstNATChain(b *strings.Builder, cfg config.Config) {
-	if !cfg.Security.NAT || len(cfg.Security.PortForwards) == 0 {
+func writeDstNATChain(b *strings.Builder, cfg config.Config, warnings *[]string) {
+	if !cfg.Security.NAT || (len(cfg.Security.PortForwards) == 0 && len(cfg.Security.OneToOneNAT) == 0) {
 		return
 	}
 	b.WriteString("  chain dstnat {\n    type nat hook prerouting priority dstnat; policy accept;\n")
+	for _, nat := range cfg.Security.OneToOneNAT {
+		if !nat.Enabled {
+			continue
+		}
+		internal, external, singleHost := natSingleHost(nat)
+		if !singleHost {
+			*warnings = append(*warnings, fmt.Sprintf("1:1 NAT %s uses CIDR netmap; full nft map rendering is TODO", nat.ID))
+			continue
+		}
+		if len(nat.Interfaces) == 0 {
+			fmt.Fprintf(b, "    ip daddr %s dnat to %s comment %q\n", external, internal, nat.ID)
+			continue
+		}
+		for _, iface := range nat.Interfaces {
+			fmt.Fprintf(b, "    iifname %q ip daddr %s dnat to %s comment %q\n", iface, external, internal, nat.ID)
+		}
+	}
 	for _, forward := range cfg.Security.PortForwards {
 		if !forward.Enabled {
 			continue
@@ -115,6 +132,27 @@ func portForwardSourceExpressions(cidrs []string) []string {
 		out = append(out, "ip6 saddr "+nftSet(v6))
 	}
 	return out
+}
+
+func natSingleHost(nat config.OneToOneNAT) (string, string, bool) {
+	internal, err := netip.ParsePrefix(nat.InternalCIDR)
+	if err != nil {
+		return "", "", false
+	}
+	external, err := netip.ParsePrefix(nat.ExternalCIDR)
+	if err != nil {
+		return "", "", false
+	}
+	if internal.Addr().Is4() != external.Addr().Is4() {
+		return "", "", false
+	}
+	if internal.Addr().Is4() && internal.Bits() == 32 && external.Bits() == 32 {
+		return internal.Addr().String(), external.Addr().String(), true
+	}
+	if internal.Addr().Is6() && internal.Bits() == 128 && external.Bits() == 128 {
+		return internal.Addr().String(), external.Addr().String(), true
+	}
+	return internal.Addr().String(), external.Addr().String(), false
 }
 
 func writePreroutingChain(b *strings.Builder, cfg config.Config, warnings *[]string) {
@@ -198,11 +236,28 @@ func writeForwardChain(b *strings.Builder, cfg config.Config, warnings *[]string
 	b.WriteString("  }\n")
 }
 
-func writePostroutingChain(b *strings.Builder, cfg config.Config) {
+func writePostroutingChain(b *strings.Builder, cfg config.Config, warnings *[]string) {
 	if !cfg.Security.NAT {
 		return
 	}
 	b.WriteString("  chain postrouting {\n    type nat hook postrouting priority srcnat; policy accept;\n")
+	for _, nat := range cfg.Security.OneToOneNAT {
+		if !nat.Enabled {
+			continue
+		}
+		internal, external, singleHost := natSingleHost(nat)
+		if !singleHost {
+			*warnings = append(*warnings, fmt.Sprintf("1:1 NAT %s uses CIDR netmap; full nft map rendering is TODO", nat.ID))
+			continue
+		}
+		if len(nat.Interfaces) == 0 {
+			fmt.Fprintf(b, "    ip saddr %s snat to %s comment %q\n", internal, external, nat.ID)
+			continue
+		}
+		for _, iface := range nat.Interfaces {
+			fmt.Fprintf(b, "    oifname %q ip saddr %s snat to %s comment %q\n", iface, internal, external, nat.ID)
+		}
+	}
 	for _, iface := range cfg.Interfaces {
 		if iface.Enabled && (iface.Masquerade || iface.Role == "wan") {
 			fmt.Fprintf(b, "    oifname %q masquerade comment %q\n", iface.Name, "nat "+iface.Name)

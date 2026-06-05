@@ -21,6 +21,7 @@ func BuildPlan(cfg config.Config) (control.Plan, error) {
 	addTunnelPlan(&plan, cfg.Tunnels)
 	addRoutingPlan(&plan, cfg)
 	addServicesPlan(&plan, cfg)
+	addPlatformPlan(&plan, cfg)
 	addSecurityPlan(&plan, cfg)
 
 	nft, warnings := BuildNftables(cfg)
@@ -297,6 +298,22 @@ func addSecurityPlan(plan *control.Plan, cfg config.Config) {
 		plan.AddWrite("render dnsmasq filtering profile", "/etc/las/dnsmasq-router.conf", "0600", renderDNSMasqConfig(security.DNSFiltering))
 		plan.AddCommand("enable dnsmasq", "systemctl", "enable", "--now", "dnsmasq")
 	}
+	if security.ThreatFeeds.Enabled {
+		plan.AddWrite("render threat feed sources", "/etc/las/threat-feeds.conf", "0600", strings.Join(security.ThreatFeeds.SourceURLs, "\n")+"\n")
+		plan.AddWarning("threat feeds are modeled; feed downloader to nft sets and Suricata rules is enabled as an integration hook")
+	}
+	if security.CaptivePortal.Enabled {
+		plan.AddWrite("render captive portal profile", "/etc/las/captive-portal.conf", "0600", renderCaptivePortalConfig(security.CaptivePortal))
+		plan.AddCommand("enable captive portal engine", "systemctl", "enable", "--now", captivePortalService(security.CaptivePortal.Engine))
+	}
+	if security.RADIUS.Enabled {
+		plan.AddWrite("render RADIUS client profile", "/etc/las/radius.conf", "0600", renderRADIUSConfig(security.RADIUS))
+		plan.AddCommand("enable FreeRADIUS", "systemctl", "enable", "--now", "freeradius")
+	}
+	if security.UPnP.Enabled {
+		plan.AddWrite("render miniupnpd config", "/etc/miniupnpd/miniupnpd.conf", "0600", renderUPnPConfig(security.UPnP))
+		plan.AddCommand("enable miniupnpd", "systemctl", "enable", "--now", "miniupnpd")
+	}
 }
 
 func addServicesPlan(plan *control.Plan, cfg config.Config) {
@@ -316,6 +333,157 @@ func addServicesPlan(plan *control.Plan, cfg config.Config) {
 	if services.MPLS.Enabled {
 		plan.AddWarning("MPLS is modeled for links %s; enable kernel MPLS modules and complete FRR LDP/VPLS renderer TODO", strings.Join(services.MPLS.Interfaces, ","))
 		plan.AddCommand("enable FRR for MPLS/LDP", "systemctl", "enable", "--now", "frr")
+	}
+}
+
+func addPlatformPlan(plan *control.Plan, cfg config.Config) {
+	addL2Plan(plan, cfg.Platform.L2)
+	addDynamicRoutingPlan(plan, cfg.Platform.Routing, cfg.Services.MPLS)
+	addQoSPlan(plan, cfg.Platform.QoS)
+	addMonitoringPlan(plan, cfg.Platform.Monitor)
+	addAutomationPlan(plan, cfg.Platform.Automation)
+	if cfg.Platform.Access.AuthEnabled {
+		plan.AddWrite("render LAS access policy", "/etc/las/access.json", "0600", renderAccessConfig(cfg.Platform.Access))
+		plan.AddWarning("access/RBAC is modeled and written to /etc/las/access.json; enforcing it in the HTTP API/session layer is the next hardening step")
+	}
+}
+
+func addL2Plan(plan *control.Plan, l2 config.L2Config) {
+	for _, bond := range l2.Bonds {
+		mode := bond.Mode
+		if mode == "" {
+			mode = "802.3ad"
+		}
+		plan.AddCommand("load bonding module", "modprobe", "bonding")
+		plan.AddCommand("ensure bond "+bond.Name, "sh", "-c", fmt.Sprintf("ip link show dev %s >/dev/null 2>&1 || ip link add %s type bond mode %s", bond.Name, bond.Name, mode))
+		if bond.MTU > 0 {
+			plan.AddCommand("set mtu for bond "+bond.Name, "ip", "link", "set", "dev", bond.Name, "mtu", strconv.Itoa(bond.MTU))
+		}
+		for _, member := range bond.Members {
+			plan.AddCommand("enslave "+member+" to "+bond.Name, "sh", "-c", fmt.Sprintf("ip link set %s down; ip link set %s master %s; ip link set %s up", member, member, bond.Name, member))
+		}
+		plan.AddCommand("bring up bond "+bond.Name, "ip", "link", "set", "dev", bond.Name, "up")
+	}
+	for _, bridge := range l2.Bridges {
+		plan.AddCommand("ensure bridge "+bridge.Name, "sh", "-c", fmt.Sprintf("ip link show dev %s >/dev/null 2>&1 || ip link add name %s type bridge", bridge.Name, bridge.Name))
+		stp := "0"
+		if bridge.STP {
+			stp = "1"
+		}
+		plan.AddCommand("set bridge stp "+bridge.Name, "ip", "link", "set", "dev", bridge.Name, "type", "bridge", "stp_state", stp)
+		if bridge.VLANAware {
+			plan.AddCommand("enable vlan-aware bridge "+bridge.Name, "ip", "link", "set", "dev", bridge.Name, "type", "bridge", "vlan_filtering", "1")
+		}
+		for _, member := range bridge.Members {
+			plan.AddCommand("add bridge member "+member, "sh", "-c", fmt.Sprintf("ip link set %s master %s; ip link set %s up", member, bridge.Name, member))
+		}
+		plan.AddCommand("bring up bridge "+bridge.Name, "ip", "link", "set", "dev", bridge.Name, "up")
+	}
+	for _, vlan := range l2.VLANs {
+		plan.AddCommand("ensure vlan "+vlan.Name, "sh", "-c", fmt.Sprintf("ip link show dev %s >/dev/null 2>&1 || ip link add link %s name %s type vlan id %d", vlan.Name, vlan.Parent, vlan.Name, vlan.ID))
+		if vlan.MTU > 0 {
+			plan.AddCommand("set mtu for vlan "+vlan.Name, "ip", "link", "set", "dev", vlan.Name, "mtu", strconv.Itoa(vlan.MTU))
+		}
+		for _, ip := range vlan.IPs {
+			plan.AddCommand("assign "+ip+" to "+vlan.Name, "ip", "address", "replace", ip, "dev", vlan.Name)
+		}
+		plan.AddCommand("bring up vlan "+vlan.Name, "ip", "link", "set", "dev", vlan.Name, "up")
+	}
+	if len(l2.VRRP) > 0 {
+		plan.AddWrite("render keepalived VRRP config", "/etc/keepalived/keepalived.conf", "0600", renderKeepalived(l2.VRRP))
+		plan.AddCommand("enable keepalived", "systemctl", "enable", "--now", "keepalived")
+	}
+}
+
+func addDynamicRoutingPlan(plan *control.Plan, routing config.DynamicRouting, mpls config.MPLSConfig) {
+	for _, vrf := range routing.VRFs {
+		plan.AddCommand("ensure vrf "+vrf.Name, "sh", "-c", fmt.Sprintf("ip link show dev %s >/dev/null 2>&1 || ip link add %s type vrf table %d", vrf.Name, vrf.Name, vrf.Table))
+		plan.AddCommand("bring up vrf "+vrf.Name, "ip", "link", "set", "dev", vrf.Name, "up")
+		for _, iface := range vrf.Interfaces {
+			plan.AddCommand("attach "+iface+" to vrf "+vrf.Name, "ip", "link", "set", "dev", iface, "master", vrf.Name)
+		}
+	}
+	if routing.BGP.Enabled || routing.OSPF.Enabled || routing.RIP.Enabled || routing.BFD.Enabled || mpls.Enabled || len(routing.RouteMaps) > 0 {
+		plan.AddWrite("render FRR routing config", "/etc/frr/frr.conf", "0600", renderFRRConfig(routing, mpls))
+		plan.AddWrite("render FRR daemon toggles", "/etc/frr/daemons", "0644", renderFRRDaemons(routing, mpls))
+		plan.AddCommand("enable FRR routing stack", "systemctl", "enable", "--now", "frr")
+	}
+	if mpls.Enabled {
+		plan.AddCommand("load MPLS modules", "sh", "-c", "modprobe mpls_router || true; modprobe mpls_gso || true")
+		for _, iface := range mpls.Interfaces {
+			plan.AddCommand("enable MPLS input on "+iface, "sysctl", "-w", "net.mpls.conf."+iface+".input=1")
+		}
+	}
+}
+
+func addQoSPlan(plan *control.Plan, qos config.QoSConfig) {
+	if !qos.Enabled {
+		return
+	}
+	for _, queue := range qos.Queues {
+		kind := queue.Kind
+		if kind == "" {
+			kind = "cake"
+		}
+		switch kind {
+		case "cake":
+			args := []string{"qdisc", "replace", "dev", queue.Interface, "root", "cake"}
+			if queue.Rate != "" {
+				args = append(args, "bandwidth", queue.Rate)
+			}
+			plan.AddCommand("install CAKE queue "+queue.ID, "tc", args...)
+		case "fq_codel":
+			plan.AddCommand("install FQ-CoDel queue "+queue.ID, "tc", "qdisc", "replace", "dev", queue.Interface, "root", "fq_codel")
+		default:
+			plan.AddWarning("qos queue %s kind %s is modeled but needs a renderer", queue.ID, kind)
+		}
+	}
+}
+
+func addMonitoringPlan(plan *control.Plan, monitor config.MonitoringConfig) {
+	if monitor.SNMP.Enabled {
+		plan.AddWrite("render snmpd config", "/etc/snmp/snmpd.conf", "0600", renderSNMPConfig(monitor.SNMP))
+		plan.AddCommand("enable snmpd", "systemctl", "enable", "--now", "snmpd")
+	}
+	if monitor.NetFlow.Enabled {
+		plan.AddWrite("render softflowd defaults", "/etc/default/softflowd", "0644", renderSoftflowdConfig(monitor.NetFlow))
+		plan.AddCommand("enable softflowd", "systemctl", "enable", "--now", "softflowd")
+	}
+	if monitor.TrafficGraphs.Enabled {
+		plan.AddCommand("enable node exporter", "systemctl", "enable", "--now", "prometheus-node-exporter")
+		plan.AddWarning("traffic graph UI is modeled via node exporter; dashboard rendering is TODO")
+	}
+}
+
+func addAutomationPlan(plan *control.Plan, automation config.AutomationConfig) {
+	if automation.AuditLog.Enabled {
+		path := automation.AuditLog.Path
+		if path == "" {
+			path = "/var/log/las/audit.log"
+		}
+		plan.AddCommand("ensure audit log", "sh", "-c", fmt.Sprintf("install -d -m 0750 %s; touch %s; chmod 0600 %s", shellQuote(filepathDir(path)), shellQuote(path), shellQuote(path)))
+	}
+	if automation.RollbackWatchdog.Enabled {
+		plan.AddWrite("render rollback watchdog", "/usr/local/sbin/las-rollback-watchdog", "0755", renderRollbackWatchdog(automation.RollbackWatchdog))
+		plan.AddWrite("render rollback watchdog service", "/etc/systemd/system/las-rollback-watchdog.service", "0644", "[Unit]\nDescription=LAS rollback watchdog\nAfter=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/sbin/las-rollback-watchdog\n")
+	}
+	for _, job := range automation.Scheduler {
+		if !job.Enabled {
+			continue
+		}
+		service := fmt.Sprintf("[Unit]\nDescription=LAS scheduled job %s\n\n[Service]\nType=oneshot\nExecStart=/bin/sh -c %s\n", job.ID, shellQuote(job.Command))
+		timer := fmt.Sprintf("[Unit]\nDescription=LAS scheduled job timer %s\n\n[Timer]\nOnCalendar=%s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n", job.ID, job.Schedule)
+		plan.AddWrite("render scheduled job service "+job.ID, "/etc/systemd/system/las-job-"+job.ID+".service", "0644", service)
+		plan.AddWrite("render scheduled job timer "+job.ID, "/etc/systemd/system/las-job-"+job.ID+".timer", "0644", timer)
+		plan.AddCommand("enable scheduled job "+job.ID, "systemctl", "enable", "--now", "las-job-"+job.ID+".timer")
+	}
+	if automation.Backup.Enabled {
+		plan.AddWrite("render backup script", "/usr/local/sbin/las-backup", "0755", renderBackupScript(automation.Backup))
+		if automation.Backup.Schedule != "" {
+			plan.AddWrite("render backup timer", "/etc/systemd/system/las-backup.timer", "0644", fmt.Sprintf("[Unit]\nDescription=LAS backup timer\n\n[Timer]\nOnCalendar=%s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n", automation.Backup.Schedule))
+			plan.AddWrite("render backup service", "/etc/systemd/system/las-backup.service", "0644", "[Unit]\nDescription=LAS backup\n\n[Service]\nType=oneshot\nExecStart=/usr/local/sbin/las-backup\n")
+			plan.AddCommand("enable LAS backup timer", "systemctl", "enable", "--now", "las-backup.timer")
+		}
 	}
 }
 
@@ -365,6 +533,223 @@ func renderChronyConfig(server config.NTPServiceConfig, client config.NTPClientC
 		b.WriteString("local stratum 10\n")
 	}
 	return b.String()
+}
+
+func renderKeepalived(entries []config.VRRP) string {
+	var b strings.Builder
+	b.WriteString("# Managed by LAS.\n")
+	for _, entry := range entries {
+		state := "BACKUP"
+		if entry.Priority >= 150 {
+			state = "MASTER"
+		}
+		b.WriteString(fmt.Sprintf("vrrp_instance %s {\n", entry.ID))
+		b.WriteString("  state " + state + "\n")
+		b.WriteString("  interface " + entry.Interface + "\n")
+		b.WriteString(fmt.Sprintf("  virtual_router_id %d\n", entry.VRID))
+		b.WriteString(fmt.Sprintf("  priority %d\n", entry.Priority))
+		b.WriteString("  advert_int 1\n")
+		if !entry.Preempt {
+			b.WriteString("  nopreempt\n")
+		}
+		b.WriteString("  virtual_ipaddress {\n")
+		for _, vip := range entry.VIPs {
+			b.WriteString("    " + vip + "\n")
+		}
+		b.WriteString("  }\n}\n")
+	}
+	return b.String()
+}
+
+func renderFRRConfig(routing config.DynamicRouting, mpls config.MPLSConfig) string {
+	var b strings.Builder
+	b.WriteString("frr version 8\nfrr defaults traditional\nhostname las-router\nservice integrated-vtysh-config\n!\n")
+	for _, routeMap := range routing.RouteMaps {
+		action := routeMap.Action
+		if action == "" {
+			action = "permit"
+		}
+		b.WriteString(fmt.Sprintf("route-map %s %s %d\n", routeMap.Name, action, routeMap.Sequence))
+		for _, match := range routeMap.Matches {
+			b.WriteString(" match " + match + "\n")
+		}
+		for _, set := range routeMap.Sets {
+			b.WriteString(" set " + set + "\n")
+		}
+		b.WriteString("!\n")
+	}
+	if routing.BGP.Enabled {
+		b.WriteString(fmt.Sprintf("router bgp %d\n", routing.BGP.ASN))
+		if routing.BGP.RouterID != "" {
+			b.WriteString(" bgp router-id " + routing.BGP.RouterID + "\n")
+		}
+		for _, network := range routing.BGP.Networks {
+			b.WriteString(" network " + network + "\n")
+		}
+		for _, peer := range routing.BGP.Peers {
+			b.WriteString(fmt.Sprintf(" neighbor %s remote-as %d\n", peer.Address, peer.RemoteASN))
+			if peer.Password != "" {
+				b.WriteString(" neighbor " + peer.Address + " password " + peer.Password + "\n")
+			}
+			if peer.Multihop > 0 {
+				b.WriteString(fmt.Sprintf(" neighbor %s ebgp-multihop %d\n", peer.Address, peer.Multihop))
+			}
+			if peer.RouteMapIn != "" {
+				b.WriteString(" neighbor " + peer.Address + " route-map " + peer.RouteMapIn + " in\n")
+			}
+			if peer.RouteMapOut != "" {
+				b.WriteString(" neighbor " + peer.Address + " route-map " + peer.RouteMapOut + " out\n")
+			}
+		}
+		b.WriteString("!\n")
+	}
+	if routing.OSPF.Enabled {
+		b.WriteString("router ospf\n")
+		if routing.OSPF.RouterID != "" {
+			b.WriteString(" ospf router-id " + routing.OSPF.RouterID + "\n")
+		}
+		for _, network := range routing.OSPF.Networks {
+			b.WriteString(" network " + network + " area 0\n")
+		}
+		b.WriteString("!\n")
+	}
+	if routing.RIP.Enabled {
+		b.WriteString("router rip\n")
+		for _, network := range routing.RIP.Networks {
+			b.WriteString(" network " + network + "\n")
+		}
+		b.WriteString("!\n")
+	}
+	if routing.BFD.Enabled {
+		b.WriteString("bfd\n")
+		for _, peer := range routing.BFD.Peers {
+			b.WriteString(" peer " + peer.Address)
+			if peer.Interface != "" {
+				b.WriteString(" interface " + peer.Interface)
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("!\n")
+	}
+	if mpls.Enabled && mpls.LDP {
+		b.WriteString("mpls ldp\n")
+		for _, iface := range mpls.Interfaces {
+			b.WriteString(" interface " + iface + "\n")
+		}
+		b.WriteString("!\n")
+	}
+	b.WriteString("line vty\n")
+	return b.String()
+}
+
+func renderFRRDaemons(routing config.DynamicRouting, mpls config.MPLSConfig) string {
+	yesNo := func(enabled bool) string {
+		if enabled {
+			return "yes"
+		}
+		return "no"
+	}
+	return fmt.Sprintf("zebra=yes\nbgpd=%s\nospfd=%s\nripd=%s\nbfdd=%s\nldpd=%s\nvtysh_enable=yes\n", yesNo(routing.BGP.Enabled), yesNo(routing.OSPF.Enabled), yesNo(routing.RIP.Enabled), yesNo(routing.BFD.Enabled), yesNo(mpls.Enabled && mpls.LDP))
+}
+
+func renderSNMPConfig(snmp config.SNMPConfig) string {
+	community := snmp.Community
+	if community == "" {
+		community = "public"
+	}
+	listen := snmp.Listen
+	if listen == "" {
+		listen = "udp:161"
+	}
+	var b strings.Builder
+	b.WriteString("# Managed by LAS.\n")
+	b.WriteString("agentAddress " + listen + "\n")
+	b.WriteString("rocommunity " + community + "\n")
+	if snmp.Location != "" {
+		b.WriteString("sysLocation " + snmp.Location + "\n")
+	}
+	if snmp.Contact != "" {
+		b.WriteString("sysContact " + snmp.Contact + "\n")
+	}
+	return b.String()
+}
+
+func renderSoftflowdConfig(netflow config.NetFlowConfig) string {
+	engine := netflow.Engine
+	if engine == "" {
+		engine = "softflowd"
+	}
+	collector := netflow.Collector
+	if collector == "" {
+		collector = "127.0.0.1"
+	}
+	port := netflow.Port
+	if port == 0 {
+		port = 2055
+	}
+	ifaces := strings.Join(netflow.Interfaces, ",")
+	return fmt.Sprintf("# Managed by LAS.\nINTERFACE=\"%s\"\nOPTIONS=\"-n %s:%d\"\nENGINE=\"%s\"\n", ifaces, collector, port, engine)
+}
+
+func renderAccessConfig(access config.AccessConfig) string {
+	var b strings.Builder
+	b.WriteString("{\n")
+	b.WriteString(fmt.Sprintf("  \"authEnabled\": %t,\n", access.AuthEnabled))
+	b.WriteString(fmt.Sprintf("  \"sessionTtl\": %q,\n", access.SessionTTL))
+	b.WriteString("  \"roles\": [\n")
+	for i, role := range access.Roles {
+		comma := ","
+		if i == len(access.Roles)-1 {
+			comma = ""
+		}
+		b.WriteString(fmt.Sprintf("    {\"name\": %q, \"permissions\": %q}%s\n", role.Name, strings.Join(role.Permissions, ","), comma))
+	}
+	b.WriteString("  ],\n  \"users\": [\n")
+	for i, user := range access.Users {
+		comma := ","
+		if i == len(access.Users)-1 {
+			comma = ""
+		}
+		b.WriteString(fmt.Sprintf("    {\"username\": %q, \"roles\": %q, \"disabled\": %t}%s\n", user.Username, strings.Join(user.Roles, ","), user.Disabled, comma))
+	}
+	b.WriteString("  ]\n}\n")
+	return b.String()
+}
+
+func renderRollbackWatchdog(watchdog config.RollbackWatchdog) string {
+	target := watchdog.ProbeTarget
+	if target == "" {
+		target = "1.1.1.1"
+	}
+	recovery := watchdog.RecoveryPath
+	if recovery == "" {
+		recovery = "/root/ruleset.before"
+	}
+	return fmt.Sprintf("#!/usr/bin/env bash\nset -euo pipefail\nif ! ping -c 3 -W 2 %s >/dev/null 2>&1; then\n  if [[ -f %s ]]; then nft -f %s; fi\nfi\n", shellQuote(target), shellQuote(recovery), shellQuote(recovery))
+}
+
+func renderBackupScript(backup config.BackupConfig) string {
+	dest := backup.Destination
+	if dest == "" {
+		dest = "/var/backups/las"
+	}
+	var b strings.Builder
+	b.WriteString("#!/usr/bin/env bash\nset -euo pipefail\n")
+	b.WriteString("dest=" + shellQuote(dest) + "\n")
+	b.WriteString("install -d -m 0700 \"$dest\"\n")
+	b.WriteString("tar -czf \"$dest/las-$(date +%Y%m%d-%H%M%S).tar.gz\" /etc/las /usr/share/las 2>/dev/null\n")
+	if backup.Encrypt {
+		b.WriteString("# Encryption hook: configure age/gpg recipient before enabling encrypted backups.\n")
+	}
+	return b.String()
+}
+
+func filepathDir(path string) string {
+	idx := strings.LastIndex(path, "/")
+	if idx <= 0 {
+		return "."
+	}
+	return path[:idx]
 }
 
 func resolveRuleRoute(rule config.RouteRule, tunnels []config.Tunnel) (int, int) {
@@ -475,5 +860,46 @@ func renderDNSMasqConfig(dns config.DNSFilteringConf) string {
 	for _, blocklist := range dns.Blocklists {
 		b.WriteString("# blocklist=" + blocklist + "\n")
 	}
+	return b.String()
+}
+
+func renderCaptivePortalConfig(portal config.CaptivePortal) string {
+	var b strings.Builder
+	b.WriteString("# Managed by LAS.\n")
+	b.WriteString("engine=" + captivePortalService(portal.Engine) + "\n")
+	b.WriteString("interfaces=" + strings.Join(portal.Interfaces, ",") + "\n")
+	b.WriteString("login_url=" + portal.LoginURL + "\n")
+	b.WriteString(fmt.Sprintf("radius=%t\n", portal.RADIUS))
+	return b.String()
+}
+
+func captivePortalService(engine string) string {
+	if engine == "" || engine == "opennds" {
+		return "opennds"
+	}
+	return engine
+}
+
+func renderRADIUSConfig(radius config.RADIUSConfig) string {
+	var b strings.Builder
+	b.WriteString("# Managed by LAS.\n")
+	b.WriteString("servers=" + strings.Join(radius.Servers, ",") + "\n")
+	b.WriteString("secret=" + radius.Secret + "\n")
+	b.WriteString("nas_id=" + radius.NASID + "\n")
+	return b.String()
+}
+
+func renderUPnPConfig(upnp config.UPnPConfig) string {
+	var b strings.Builder
+	b.WriteString("# Managed by LAS.\n")
+	if upnp.ExternalIface != "" {
+		b.WriteString("ext_ifname=" + upnp.ExternalIface + "\n")
+	}
+	for _, iface := range upnp.InternalIfaces {
+		b.WriteString("listening_ip=" + iface + "\n")
+	}
+	b.WriteString("secure_mode=yes\n")
+	b.WriteString("enable_natpmp=yes\n")
+	b.WriteString("enable_upnp=yes\n")
 	return b.String()
 }

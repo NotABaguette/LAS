@@ -341,6 +341,141 @@
       "vrf": ""
     }
   },
+  "platform": {
+    "l2": {
+      "vlans": [
+        {
+          "name": "enp2s0.20",
+          "parent": "enp2s0",
+          "id": 20,
+          "mtu": 1500,
+          "role": "lan",
+          "ips": ["192.168.20.1/24"]
+        }
+      ],
+      "bridges": [
+        {
+          "name": "br-lan",
+          "members": ["enp2s0"],
+          "stp": true,
+          "vlanAware": true,
+          "vlans": [20],
+          "mtu": 1500,
+          "description": "LAN bridge"
+        }
+      ],
+      "bonds": [],
+      "vrrp": [
+        {
+          "id": "lan-vrrp",
+          "interface": "enp2s0",
+          "vrid": 10,
+          "priority": 120,
+          "vips": ["192.168.88.254/24"],
+          "preempt": true
+        }
+      ]
+    },
+    "dynamicRouting": {
+      "vrfs": [
+        {
+          "name": "vrf-corp",
+          "table": 202,
+          "interfaces": ["wg-office"]
+        }
+      ],
+      "bgp": {
+        "enabled": false,
+        "asn": 64512,
+        "routerId": "192.168.88.1",
+        "networks": ["192.168.88.0/24"],
+        "peers": []
+      },
+      "ospf": {
+        "enabled": false,
+        "routerId": "192.168.88.1",
+        "networks": ["192.168.88.0/24"]
+      },
+      "rip": {
+        "enabled": false,
+        "networks": []
+      },
+      "bfd": {
+        "enabled": false,
+        "peers": []
+      },
+      "routeMaps": []
+    },
+    "qos": {
+      "enabled": true,
+      "queues": [
+        {
+          "id": "wan-cake",
+          "interface": "enp1s0",
+          "kind": "cake",
+          "rate": "100mbit",
+          "ceil": "",
+          "priority": 0,
+          "matchMark": 0
+        }
+      ]
+    },
+    "monitoring": {
+      "snmp": {
+        "enabled": false,
+        "community": "public",
+        "listen": "udp:161",
+        "location": "edge",
+        "contact": "admin"
+      },
+      "netflow": {
+        "enabled": false,
+        "engine": "softflowd",
+        "collector": "192.168.88.2",
+        "port": 2055,
+        "interfaces": ["enp1s0"]
+      },
+      "trafficGraphs": {
+        "enabled": false,
+        "engine": "node-exporter",
+        "listen": ":9100"
+      }
+    },
+    "automation": {
+      "auditLog": {
+        "enabled": true,
+        "path": "/var/log/las/audit.log"
+      },
+      "rollbackWatchdog": {
+        "enabled": false,
+        "probeTarget": "192.168.88.1",
+        "timeout": "30s",
+        "recoveryPath": "/root/ruleset.before"
+      },
+      "scheduler": [],
+      "backup": {
+        "enabled": false,
+        "schedule": "daily",
+        "destination": "/var/backups/las",
+        "encrypt": false
+      }
+    },
+    "access": {
+      "authEnabled": false,
+      "sessionTtl": "12h",
+      "users": [],
+      "roles": [
+        {
+          "name": "admin",
+          "permissions": ["*"]
+        },
+        {
+          "name": "viewer",
+          "permissions": ["read:*"]
+        }
+      ]
+    }
+  },
   "security": {
     "nat": true,
     "firewall": true,
@@ -357,6 +492,16 @@
         "internalIp": "192.168.88.10",
         "internalPort": 443,
         "sourceCIDRs": [],
+        "log": true
+      }
+    ],
+    "oneToOneNat": [
+      {
+        "id": "one-to-one-host",
+        "enabled": false,
+        "internalCidr": "192.168.88.20/32",
+        "externalCidr": "203.0.113.20/32",
+        "interfaces": ["enp1s0"],
         "log": true
       }
     ],
@@ -378,6 +523,30 @@
       "enabled": false,
       "upstream": ["1.1.1.1", "9.9.9.9"],
       "blocklists": []
+    },
+    "threatFeeds": {
+      "enabled": false,
+      "sourceUrls": [],
+      "refresh": "24h",
+      "action": "drop"
+    },
+    "captivePortal": {
+      "enabled": false,
+      "engine": "opennds",
+      "interfaces": ["enp2s0"],
+      "loginUrl": "",
+      "radius": false
+    },
+    "radius": {
+      "enabled": false,
+      "servers": [],
+      "secret": "",
+      "nasId": "las-edge"
+    },
+    "upnp": {
+      "enabled": false,
+      "internalIfaces": ["enp2s0"],
+      "externalIface": "enp1s0"
     }
   }
 }

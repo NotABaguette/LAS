@@ -22,6 +22,7 @@ Status legend:
 | VXLAN | done | `ip link type vxlan` |
 | ERSPAN | done | `ip link type erspan` |
 | OpenVPN | partial | `openvpn-client@.service`, full profile renderer TODO |
+| OpenVPN backend | todo | client/server profile renderer, CA/cert generation, CCD, pushed routes/DNS, auth plugins, tun/tap mode, status counters |
 | IPsec IKEv1/IKEv2 | partial | strongSwan, full peer/proposal/secret renderer TODO |
 | L2TP | partial | `xl2tpd`, full PPP profile renderer TODO |
 | L2TP/IPsec | partial | strongSwan plus `xl2tpd`, full renderer TODO |
@@ -67,6 +68,9 @@ Status legend:
 | Multiple routing tables | done | table fields on routes/tunnels/rules |
 | GeoIP route sets | partial | static CIDRs render to nft sets; dynamic feed generator TODO |
 | Application/service routing | partial | labels and route sets modeled; feed mapping TODO |
+| Complete application/service routing catalog | todo | built-in app catalog for Telegram, WhatsApp, Meta, Google, Cloudflare, Microsoft, Apple, gaming, streaming, VoIP, custom apps |
+| Application/service feed pipeline | todo | scheduled download, signature validation, CIDR/domain/SNI/QUIC metadata normalization, nft set publishing, stale-feed rollback |
+| Per-app route observability | todo | counters per app/service route set and per rule, shown in UI/API |
 | WAN load balancing | partial | weighted ECMP/failover tables modeled and rendered |
 | VRF-lite | todo | `ip link type vrf` |
 | BGP | todo | FRR integration |
@@ -86,9 +90,16 @@ Status legend:
 | Reject/drop rules | done | nftables forward chain |
 | Port forwarding / dstnat | done | nftables DNAT renderer |
 | 1:1 NAT / netmap | todo | nftables SNAT/DNAT maps |
+| Custom NAT policies | todo | user-defined source/destination NAT rules across prerouting, postrouting, output, input where supported by nftables |
+| Chain-aware firewall policies | todo | first-class input, forward, output policy model with allow/drop/reject/jump/log/rate-limit actions |
+| Zone firewall | todo | interface/tunnel/VRF zones and rule matrix for what traffic can go where |
+| Per-rule counters | todo | nftables counters for firewall, NAT, mangle, app/service rules surfaced in API/UI |
 | Address lists | todo | nft sets |
 | Domain/GeoIP matching | partial | modeled; route-set/feed generator TODO |
 | Queues / bandwidth limits | todo | Linux `tc`, CAKE/FQ-CoDel/HTB |
+| Per inbound/outbound traffic statistics | todo | traffic counters per physical interface, tunnel, VPN user, WAN group, route rule, and app/service set |
+| Per inbound/outbound traffic quotas | todo | quota accounting and enforcement for interface/tunnel/VPN/user/app in bytes, rate, reset interval, and over-limit action |
+| Per tunnel/VPN limits | todo | tc/nft quota integration for OpenVPN, WireGuard, Xray/sing-box, IPsec/L2TP users and interfaces |
 | FastTrack equivalent | todo | flowtable/offload evaluation |
 | UPnP | todo | miniupnpd integration |
 
@@ -112,6 +123,8 @@ Status legend:
 | Dry-run apply plans | done | commands/writes/warnings |
 | System status probe | done | command/service availability |
 | Diagnostics | partial | ping, traceroute, curl-head, dig, and route lookup API/UI |
+| Traffic statistics dashboard | todo | live RX/TX, packets, drops, errors, per tunnel, per app, per rule, historical charts |
+| Usage accounting database | todo | persistent time-series store for interface/tunnel/rule/app counters and quota resets |
 | DNS server/client | partial | service model plus baseline dnsmasq/resolver config |
 | NTP server/client | partial | service model plus baseline chrony config |
 | MPLS | partial | service model plus FRR warning/enablement |
@@ -128,10 +141,13 @@ Status legend:
 ## Implementation Priorities
 
 1. Add authentication, TLS guidance, audit log, and rollback watchdog before encouraging remote production use.
-2. Complete DHCP, VLAN, bridge, dstnat, address-list, and queue renderers; these are core router features.
-3. Complete strongSwan, OpenVPN, WireGuard server, PPP/L2TP/SSTP/PPTP, Xray, and sing-box profile renderers.
-4. Add FRR for BGP/OSPF/RIP/BFD and VRF-aware routing.
-5. Add monitoring dashboards, backup/restore, and safe upgrade workflows.
+2. Complete chain-aware firewall policies and custom NAT policies before expanding advanced UI workflows.
+3. Complete traffic statistics, persistent usage accounting, and quota enforcement for inbound/outbound interfaces, tunnels, VPN users, and app/service route sets.
+4. Complete application/service routing catalog and feed pipeline, including Telegram/WhatsApp examples and custom app feeds.
+5. Complete DHCP, VLAN, bridge, dstnat, address-list, and queue renderers; these are core router features.
+6. Complete strongSwan, OpenVPN backend, WireGuard server, PPP/L2TP/SSTP/PPTP, Xray, and sing-box profile renderers.
+7. Add FRR for BGP/OSPF/RIP/BFD and VRF-aware routing.
+8. Add monitoring dashboards, backup/restore, and safe upgrade workflows.
 
 ## References
 

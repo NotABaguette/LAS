@@ -21,6 +21,7 @@ var tunnelTypes = []string{
 var tunnelDirections = []string{"client", "server", "peer"}
 var routeSetTypes = []string{"country", "application", "service", "custom"}
 var wanGroupModes = []string{"weighted-ecmp", "failover", "active-backup"}
+var bondModes = []string{"balance-rr", "active-backup", "balance-xor", "broadcast", "802.3ad", "balance-tlb", "balance-alb"}
 var actionTypes = []string{"direct", "interface", "tunnel", "wan-group", "load-balance", "blackhole", "reject", "scan", "mirror"}
 var protocols = []string{"tcp", "udp", "icmp", "icmpv6", "gre", "esp", "ah"}
 
@@ -68,6 +69,25 @@ func (c Config) Validate() error {
 			knownLinks[tunnel.InterfaceName] = struct{}{}
 		}
 	}
+	for _, vlan := range c.Platform.L2.VLANs {
+		if vlan.Name != "" {
+			knownLinks[vlan.Name] = struct{}{}
+		}
+	}
+	for _, bridge := range c.Platform.L2.Bridges {
+		if bridge.Name != "" {
+			knownLinks[bridge.Name] = struct{}{}
+		}
+	}
+	for _, bond := range c.Platform.L2.Bonds {
+		if bond.Name != "" {
+			knownLinks[bond.Name] = struct{}{}
+		}
+	}
+
+	if err := validatePlatform(c.Platform, knownLinks); err != nil {
+		return err
+	}
 
 	routeSets := map[string]RouteSet{}
 	for _, routeSet := range c.Routing.Sets {
@@ -105,7 +125,7 @@ func (c Config) Validate() error {
 	if err := validateServices(c.Services, knownLinks); err != nil {
 		return err
 	}
-	return validateSecurity(c.Security, ifaces)
+	return validateSecurity(c.Security, knownLinks)
 }
 
 func validateRouteSet(routeSet RouteSet) error {
@@ -347,8 +367,8 @@ func validateRouteRule(rule RouteRule, ifaces map[string]Interface, knownLinks m
 		}
 	}
 	if rule.Action.Type == "interface" {
-		if _, exists := ifaces[rule.Action.Target]; !exists {
-			return fmt.Errorf("rule %s targets unknown interface %q", rule.ID, rule.Action.Target)
+		if _, exists := knownLinks[rule.Action.Target]; !exists {
+			return fmt.Errorf("rule %s targets unknown link %q", rule.ID, rule.Action.Target)
 		}
 	}
 	if rule.Action.Type == "wan-group" || rule.Action.Type == "load-balance" {
@@ -365,20 +385,25 @@ func validateRouteRule(rule RouteRule, ifaces map[string]Interface, knownLinks m
 	return nil
 }
 
-func validateSecurity(security SecurityConfig, ifaces map[string]Interface) error {
+func validateSecurity(security SecurityConfig, knownLinks map[string]struct{}) error {
 	for _, port := range security.ManagementPorts {
 		if port < 1 || port > 65535 {
 			return fmt.Errorf("security management port %d is invalid", port)
 		}
 	}
 	for _, forward := range security.PortForwards {
-		if err := validatePortForward(forward, ifaces); err != nil {
+		if err := validatePortForward(forward, knownLinks); err != nil {
+			return err
+		}
+	}
+	for _, nat := range security.OneToOneNAT {
+		if err := validateOneToOneNAT(nat, knownLinks); err != nil {
 			return err
 		}
 	}
 	for _, iface := range append(security.Antivirus.Interfaces, security.IPS.Interfaces...) {
-		if _, exists := ifaces[iface]; !exists {
-			return fmt.Errorf("security references unknown interface %q", iface)
+		if _, exists := knownLinks[iface]; !exists {
+			return fmt.Errorf("security references unknown link %q", iface)
 		}
 	}
 	if security.Antivirus.MaxFileSizeMB < 0 {
@@ -392,10 +417,179 @@ func validateSecurity(security SecurityConfig, ifaces map[string]Interface) erro
 			return fmt.Errorf("dns filtering upstream %q is not an IP address", upstream)
 		}
 	}
+	for _, iface := range append(security.CaptivePortal.Interfaces, security.UPnP.InternalIfaces...) {
+		if _, exists := knownLinks[iface]; !exists {
+			return fmt.Errorf("security service references unknown link %q", iface)
+		}
+	}
+	if security.UPnP.ExternalIface != "" {
+		if _, exists := knownLinks[security.UPnP.ExternalIface]; !exists {
+			return fmt.Errorf("upnp external interface %q is unknown", security.UPnP.ExternalIface)
+		}
+	}
 	return nil
 }
 
-func validatePortForward(forward PortForward, ifaces map[string]Interface) error {
+func validatePlatform(platform PlatformConfig, knownLinks map[string]struct{}) error {
+	if err := validateL2(platform.L2, knownLinks); err != nil {
+		return err
+	}
+	if err := validateDynamicRouting(platform.Routing, knownLinks); err != nil {
+		return err
+	}
+	if err := validateQoS(platform.QoS, knownLinks); err != nil {
+		return err
+	}
+	if err := validateMonitoring(platform.Monitor, knownLinks); err != nil {
+		return err
+	}
+	return validateAutomation(platform.Automation)
+}
+
+func validateL2(l2 L2Config, knownLinks map[string]struct{}) error {
+	for _, vlan := range l2.VLANs {
+		if !identifierRE.MatchString(vlan.Name) {
+			return fmt.Errorf("invalid vlan name %q", vlan.Name)
+		}
+		if _, exists := knownLinks[vlan.Parent]; !exists {
+			return fmt.Errorf("vlan %s references unknown parent link %q", vlan.Name, vlan.Parent)
+		}
+		if vlan.ID < 1 || vlan.ID > 4094 {
+			return fmt.Errorf("vlan %s id must be 1-4094", vlan.Name)
+		}
+		for _, ip := range vlan.IPs {
+			if err := validateCIDR(ip); err != nil {
+				return fmt.Errorf("vlan %s ip %q: %w", vlan.Name, ip, err)
+			}
+		}
+	}
+	for _, bridge := range l2.Bridges {
+		if !identifierRE.MatchString(bridge.Name) {
+			return fmt.Errorf("invalid bridge name %q", bridge.Name)
+		}
+		for _, member := range bridge.Members {
+			if _, exists := knownLinks[member]; !exists {
+				return fmt.Errorf("bridge %s references unknown member %q", bridge.Name, member)
+			}
+		}
+		for _, vlan := range bridge.VLANs {
+			if vlan < 1 || vlan > 4094 {
+				return fmt.Errorf("bridge %s vlan id must be 1-4094", bridge.Name)
+			}
+		}
+	}
+	for _, bond := range l2.Bonds {
+		if !identifierRE.MatchString(bond.Name) {
+			return fmt.Errorf("invalid bond name %q", bond.Name)
+		}
+		if bond.Mode != "" && !slices.Contains(bondModes, bond.Mode) {
+			return fmt.Errorf("bond %s has unsupported mode %q", bond.Name, bond.Mode)
+		}
+		for _, member := range bond.Members {
+			if _, exists := knownLinks[member]; !exists {
+				return fmt.Errorf("bond %s references unknown member %q", bond.Name, member)
+			}
+		}
+	}
+	for _, vrrp := range l2.VRRP {
+		if !identifierRE.MatchString(vrrp.ID) {
+			return fmt.Errorf("invalid vrrp id %q", vrrp.ID)
+		}
+		if _, exists := knownLinks[vrrp.Interface]; !exists {
+			return fmt.Errorf("vrrp %s references unknown link %q", vrrp.ID, vrrp.Interface)
+		}
+		if vrrp.VRID < 1 || vrrp.VRID > 255 {
+			return fmt.Errorf("vrrp %s vrid must be 1-255", vrrp.ID)
+		}
+		for _, vip := range vrrp.VIPs {
+			if err := validateCIDR(vip); err != nil {
+				return fmt.Errorf("vrrp %s vip %q: %w", vrrp.ID, vip, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateDynamicRouting(routing DynamicRouting, knownLinks map[string]struct{}) error {
+	for _, vrf := range routing.VRFs {
+		if !identifierRE.MatchString(vrf.Name) {
+			return fmt.Errorf("invalid vrf name %q", vrf.Name)
+		}
+		if vrf.Table < 1 || vrf.Table > 252 {
+			return fmt.Errorf("vrf %s table must be 1-252", vrf.Name)
+		}
+		for _, iface := range vrf.Interfaces {
+			if _, exists := knownLinks[iface]; !exists {
+				return fmt.Errorf("vrf %s references unknown link %q", vrf.Name, iface)
+			}
+		}
+	}
+	if routing.BGP.Enabled && routing.BGP.ASN <= 0 {
+		return fmt.Errorf("bgp asn must be positive")
+	}
+	for _, network := range append(append([]string{}, routing.BGP.Networks...), append(routing.OSPF.Networks, routing.RIP.Networks...)...) {
+		if err := validateCIDR(network); err != nil {
+			return fmt.Errorf("dynamic routing network %q: %w", network, err)
+		}
+	}
+	for _, peer := range append(routing.BGP.Peers, routing.BFD.Peers...) {
+		if peer.Address != "" && net.ParseIP(peer.Address) == nil {
+			return fmt.Errorf("routing peer %s address %q is invalid", peer.Name, peer.Address)
+		}
+		if peer.Interface != "" {
+			if _, exists := knownLinks[peer.Interface]; !exists {
+				return fmt.Errorf("routing peer %s references unknown link %q", peer.Name, peer.Interface)
+			}
+		}
+	}
+	for _, routeMap := range routing.RouteMaps {
+		if !identifierRE.MatchString(routeMap.Name) {
+			return fmt.Errorf("invalid route-map name %q", routeMap.Name)
+		}
+		if routeMap.Sequence < 1 {
+			return fmt.Errorf("route-map %s sequence must be positive", routeMap.Name)
+		}
+	}
+	return nil
+}
+
+func validateQoS(qos QoSConfig, knownLinks map[string]struct{}) error {
+	for _, queue := range qos.Queues {
+		if !identifierRE.MatchString(queue.ID) {
+			return fmt.Errorf("invalid qos queue id %q", queue.ID)
+		}
+		if _, exists := knownLinks[queue.Interface]; !exists {
+			return fmt.Errorf("qos queue %s references unknown link %q", queue.ID, queue.Interface)
+		}
+	}
+	return nil
+}
+
+func validateMonitoring(monitor MonitoringConfig, knownLinks map[string]struct{}) error {
+	for _, iface := range monitor.NetFlow.Interfaces {
+		if _, exists := knownLinks[iface]; !exists {
+			return fmt.Errorf("netflow references unknown link %q", iface)
+		}
+	}
+	if monitor.NetFlow.Port < 0 || monitor.NetFlow.Port > 65535 {
+		return fmt.Errorf("netflow port must be 0-65535")
+	}
+	return nil
+}
+
+func validateAutomation(automation AutomationConfig) error {
+	for _, job := range automation.Scheduler {
+		if !identifierRE.MatchString(job.ID) {
+			return fmt.Errorf("invalid scheduled job id %q", job.ID)
+		}
+		if job.Enabled && job.Schedule == "" {
+			return fmt.Errorf("scheduled job %s requires schedule", job.ID)
+		}
+	}
+	return nil
+}
+
+func validatePortForward(forward PortForward, knownLinks map[string]struct{}) error {
 	if !identifierRE.MatchString(forward.ID) {
 		return fmt.Errorf("invalid port forward id %q", forward.ID)
 	}
@@ -403,8 +597,8 @@ func validatePortForward(forward PortForward, ifaces map[string]Interface) error
 		return nil
 	}
 	if forward.InputIface != "" {
-		if _, exists := ifaces[forward.InputIface]; !exists {
-			return fmt.Errorf("port forward %s references unknown input interface %q", forward.ID, forward.InputIface)
+		if _, exists := knownLinks[forward.InputIface]; !exists {
+			return fmt.Errorf("port forward %s references unknown input link %q", forward.ID, forward.InputIface)
 		}
 	}
 	if forward.ExternalPort < 1 || forward.ExternalPort > 65535 {
@@ -424,6 +618,27 @@ func validatePortForward(forward PortForward, ifaces map[string]Interface) error
 	for _, cidr := range forward.SourceCIDRs {
 		if err := validateCIDR(cidr); err != nil {
 			return fmt.Errorf("port forward %s source cidr %q: %w", forward.ID, cidr, err)
+		}
+	}
+	return nil
+}
+
+func validateOneToOneNAT(nat OneToOneNAT, knownLinks map[string]struct{}) error {
+	if !identifierRE.MatchString(nat.ID) {
+		return fmt.Errorf("invalid 1:1 NAT id %q", nat.ID)
+	}
+	if !nat.Enabled {
+		return nil
+	}
+	if err := validateCIDR(nat.InternalCIDR); err != nil {
+		return fmt.Errorf("1:1 NAT %s internal cidr %q: %w", nat.ID, nat.InternalCIDR, err)
+	}
+	if err := validateCIDR(nat.ExternalCIDR); err != nil {
+		return fmt.Errorf("1:1 NAT %s external cidr %q: %w", nat.ID, nat.ExternalCIDR, err)
+	}
+	for _, iface := range nat.Interfaces {
+		if _, exists := knownLinks[iface]; !exists {
+			return fmt.Errorf("1:1 NAT %s references unknown link %q", nat.ID, iface)
 		}
 	}
 	return nil

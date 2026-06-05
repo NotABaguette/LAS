@@ -11,15 +11,16 @@
 
 - Put the web UI behind SSH forwarding, a VPN, or a reverse proxy with strong authentication.
 - Configure TLS before binding beyond localhost.
-- Keep `/etc/debian-router/router.json` mode `0600`; it can contain tunnel config paths and secrets metadata.
+- Keep `/etc/las/router.json` mode `0600`; it can contain tunnel config paths and secrets metadata.
 - Use least-privilege management CIDRs.
 - Keep Suricata, ClamAV signatures, VPN engines, and Debian packages updated.
+- Review `/etc/default/las-updater`; automatic full package upgrades are convenient but may not fit every production router change-control policy.
 - Export and review plans before applying changes remotely.
 
 ## Known Limits
 
 - The current scaffold does not include a built-in user database or MFA.
-- Domain and GeoIP routing need DNS/IP-set generation before strict enforcement.
+- Dynamic domain, GeoIP, and application/service routing need feed normalization into route-set CIDRs before strict enforcement.
 - Antivirus scanning requires traffic to pass through a proxy/ICAP/file workflow; it cannot decrypt arbitrary TLS.
 - OpenVPN, IPsec/L2TP, Xray, and sing-box profiles are referenced but not fully rendered yet.
 
@@ -39,4 +40,3 @@ To recover nftables manually:
 nft flush ruleset
 systemctl restart networking
 ```
-

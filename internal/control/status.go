@@ -22,6 +22,14 @@ func ProbeStatus(ctx context.Context) HostStatus {
 			"ip":       commandVersion(ctx, "ip", "-V"),
 			"nft":      commandVersion(ctx, "nft", "--version"),
 			"wg":       commandVersion(ctx, "wg", "--version"),
+			"xray":     commandVersion(ctx, "xray", "version"),
+			"sing-box": commandVersion(ctx, "sing-box", "version"),
+			"curl":     commandVersion(ctx, "curl", "--version"),
+			"dig":      commandVersion(ctx, "dig", "-v"),
+			"traceroute": commandVersion(ctx, "traceroute",
+				"--version"),
+			"chrony":   commandVersion(ctx, "chronyd", "-v"),
+			"frr":      commandVersion(ctx, "vtysh", "-v"),
 			"suricata": commandVersion(ctx, "suricata", "--build-info"),
 			"clamd":    commandVersion(ctx, "clamd", "--version"),
 		},
@@ -30,7 +38,7 @@ func ProbeStatus(ctx context.Context) HostStatus {
 	}
 
 	if runtime.GOOS == "linux" {
-		for _, service := range []string{"nftables", "suricata", "clamav-daemon", "strongswan", "xl2tpd", "openvpn", "xray", "sing-box"} {
+		for _, service := range []string{"lasd", "las-updater.timer", "nftables", "dnsmasq", "chrony", "frr", "suricata", "clamav-daemon", "strongswan", "xl2tpd", "openvpn", "xray", "sing-box"} {
 			status.Services[service] = commandVersion(ctx, "systemctl", "is-active", service)
 		}
 	}

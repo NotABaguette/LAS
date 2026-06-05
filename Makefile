@@ -1,24 +1,24 @@
-BINARY := debian-routerd
+BINARY := lasd
 PREFIX ?= /usr/local
-SYSCONFDIR ?= /etc/debian-router
-DATADIR ?= /usr/share/debian-router
+SYSCONFDIR ?= /etc/las
+DATADIR ?= /usr/share/las
 
 .PHONY: build test run plan validate install-local
 
 build:
-	go build -o $(BINARY) ./cmd/debian-routerd
+	go build -o $(BINARY) ./cmd/lasd
 
 test:
 	go test ./...
 
 run:
-	go run ./cmd/debian-routerd --config ./configs/router.example.json --web-dir ./web
+	go run ./cmd/lasd --config ./configs/router.example.json --web-dir ./web
 
 plan:
-	go run ./cmd/debian-routerd --config ./configs/router.example.json --plan
+	go run ./cmd/lasd --config ./configs/router.example.json --plan
 
 validate:
-	go run ./cmd/debian-routerd --config ./configs/router.example.json --validate
+	go run ./cmd/lasd --config ./configs/router.example.json --validate
 
 install-local: build
 	install -d $(DESTDIR)$(PREFIX)/sbin

@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
-	"debian-router/internal/config"
-	"debian-router/internal/control"
-	"debian-router/internal/router"
+	"github.com/NotABaguette/LAS/internal/config"
+	"github.com/NotABaguette/LAS/internal/control"
+	"github.com/NotABaguette/LAS/internal/router"
 )
 
 type Options struct {
@@ -53,6 +56,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	mux.HandleFunc("/api/plan", s.handlePlan)
 	mux.HandleFunc("/api/apply", s.handleApply)
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/diagnostics", s.handleDiagnostics)
 	mux.HandleFunc("/api/default-config", s.handleDefaultConfig)
 
 	webDir := s.options.WebDir
@@ -69,7 +73,7 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		s.logger.Info("debian-routerd listening", "listen", listen, "apply", s.options.Apply)
+		s.logger.Info("lasd listening", "listen", listen, "apply", s.options.Apply)
 		if cfg.UI.TLSCertFile != "" && cfg.UI.TLSKeyFile != "" {
 			errCh <- server.ListenAndServeTLS(cfg.UI.TLSCertFile, cfg.UI.TLSKeyFile)
 			return
@@ -184,6 +188,70 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	writeJSON(w, http.StatusOK, control.ProbeStatus(ctx))
+}
+
+type diagnosticsRequest struct {
+	Tool   string `json:"tool"`
+	Target string `json:"target"`
+	Count  int    `json:"count"`
+}
+
+func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+		return
+	}
+	var req diagnosticsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("decode diagnostics request: %w", err))
+		return
+	}
+	command, err := diagnosticsCommand(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, command.Program, command.Args...)
+	output, err := cmd.CombinedOutput()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"command": command,
+		"output":  string(output),
+		"error":   errorText(err),
+	})
+}
+
+func diagnosticsCommand(req diagnosticsRequest) (control.Command, error) {
+	target := strings.TrimSpace(req.Target)
+	if target == "" {
+		return control.Command{}, fmt.Errorf("target is required")
+	}
+	count := req.Count
+	if count <= 0 {
+		count = 4
+	}
+	if count > 10 {
+		count = 10
+	}
+	switch req.Tool {
+	case "ping":
+		return control.Command{Program: "ping", Args: []string{"-c", strconv.Itoa(count), "-W", "3", target}}, nil
+	case "traceroute":
+		return control.Command{Program: "traceroute", Args: []string{"-n", target}}, nil
+	case "curl-head":
+		parsed, err := url.Parse(target)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return control.Command{}, fmt.Errorf("curl target must be an http or https URL")
+		}
+		return control.Command{Program: "curl", Args: []string{"-I", "--max-time", "10", target}}, nil
+	case "dig":
+		return control.Command{Program: "dig", Args: []string{"+short", target}}, nil
+	case "route":
+		return control.Command{Program: "ip", Args: []string{"route", "get", target}}, nil
+	default:
+		return control.Command{}, fmt.Errorf("unsupported diagnostics tool %q", req.Tool)
+	}
 }
 
 func (s *Server) configFromRequest(r *http.Request) (config.Config, error) {

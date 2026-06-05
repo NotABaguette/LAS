@@ -1,3 +1,4 @@
-debian-routerd
-.cache/
-
+/debian-routerd
+/lasd
+/.cache/
+__pycache__/

@@ -41,6 +41,7 @@ Status legend:
 | L2 bridging over VPN | todo | Linux bridge plus GRETAP/VXLAN/L2TPv3 profiles |
 | Road-warrior VPN portal | todo | generated users, certs, QR/config export |
 | Certificate authority | todo | local CA, ACME, strongSwan/OpenVPN cert lifecycle |
+| Inbound/outbound tunnel mode | partial | direction is modeled; full server/client templates TODO |
 
 ## RouterOS-Style Feature Backlog
 
@@ -53,8 +54,8 @@ Status legend:
 | Bridges | todo | Linux bridge, STP/RSTP, VLAN-aware bridge |
 | Bonding/LACP | todo | `ip link type bond` |
 | VRRP | todo | keepalived integration |
-| DHCP client | partial | modeled as `dhcp`, renderer TODO |
-| DHCP server | partial | modeled, dnsmasq/Kea renderer TODO |
+| DHCP client | partial | service model and interface `dhcp`; renderer TODO |
+| DHCP server | partial | service model plus baseline dnsmasq profile |
 | IPv6 SLAAC/DHCPv6/PD | todo | systemd-networkd/Kea integration |
 
 ### Routing
@@ -64,13 +65,16 @@ Status legend:
 | Static routes | done | per-table route rendering |
 | Policy routing | done | nft marks plus `ip rule` |
 | Multiple routing tables | done | table fields on routes/tunnels/rules |
+| GeoIP route sets | partial | static CIDRs render to nft sets; dynamic feed generator TODO |
+| Application/service routing | partial | labels and route sets modeled; feed mapping TODO |
+| WAN load balancing | partial | weighted ECMP/failover tables modeled and rendered |
 | VRF-lite | todo | `ip link type vrf` |
 | BGP | todo | FRR integration |
 | OSPFv2/v3 | todo | FRR integration |
 | RIP/RIPng | todo | FRR integration |
 | BFD | todo | FRR integration |
 | Route filters/maps | todo | FRR route-map UI |
-| ECMP | todo | multipath route model |
+| ECMP | partial | WAN group weighted route model |
 
 ### Firewall, NAT, And QoS
 
@@ -80,10 +84,10 @@ Status legend:
 | NAT masquerade | done | nftables postrouting |
 | Mangle/mark rules | done | nftables mark in prerouting |
 | Reject/drop rules | done | nftables forward chain |
-| Port forwarding / dstnat | todo | nftables DNAT renderer |
+| Port forwarding / dstnat | done | nftables DNAT renderer |
 | 1:1 NAT / netmap | todo | nftables SNAT/DNAT maps |
 | Address lists | todo | nft sets |
-| Domain/GeoIP matching | partial | modeled; IP-set generator TODO |
+| Domain/GeoIP matching | partial | modeled; route-set/feed generator TODO |
 | Queues / bandwidth limits | todo | Linux `tc`, CAKE/FQ-CoDel/HTB |
 | FastTrack equivalent | todo | flowtable/offload evaluation |
 | UPnP | todo | miniupnpd integration |
@@ -107,6 +111,11 @@ Status legend:
 | Web UI | done | static SPA |
 | Dry-run apply plans | done | commands/writes/warnings |
 | System status probe | done | command/service availability |
+| Diagnostics | partial | ping, traceroute, curl-head, dig, and route lookup API/UI |
+| DNS server/client | partial | service model plus baseline dnsmasq/resolver config |
+| NTP server/client | partial | service model plus baseline chrony config |
+| MPLS | partial | service model plus FRR warning/enablement |
+| Automatic updates | partial | daily system/core updater for apt, ClamAV, Xray-core, sing-box |
 | Audit log | todo | persistent change and apply history |
 | Rollback watchdog | todo | revert route/firewall if management path dies |
 | SNMP | todo | snmpd integration |
@@ -134,4 +143,3 @@ Status legend:
 - MikroTik L2TP documentation: https://help.mikrotik.com/docs/display/ROS/L2TP
 - MikroTik IPsec documentation: https://help.mikrotik.com/docs/spaces/ROS/pages/11993097/IPsec
 - MikroTik EoIP documentation: https://help.mikrotik.com/docs/spaces/ROS/pages/24805521/EoIP
-

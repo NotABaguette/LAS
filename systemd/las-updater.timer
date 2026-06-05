@@ -1,0 +1,11 @@
+[Unit]
+Description=Run LAS updater daily
+
+[Timer]
+OnCalendar=*-*-* 04:10:00
+RandomizedDelaySec=45m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+

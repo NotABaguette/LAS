@@ -46,6 +46,7 @@
       "id": "wg-office",
       "name": "Office WireGuard",
       "type": "wireguard",
+      "direction": "client",
       "enabled": true,
       "interfaceName": "wg-office",
       "mark": 4097,
@@ -55,7 +56,7 @@
       "localAddresses": ["10.60.0.2/32"],
       "dns": ["10.60.0.1"],
       "credentials": {
-        "configFile": "/etc/debian-router/wireguard/wg-office.conf"
+        "configFile": "/etc/las/wireguard/wg-office.conf"
       },
       "options": {
         "healthcheck": "1.1.1.1"
@@ -65,6 +66,7 @@
       "id": "xray-global",
       "name": "Global VLESS/XHTTP",
       "type": "vless-xhttp",
+      "direction": "client",
       "enabled": false,
       "interfaceName": "tun-xray0",
       "mark": 4098,
@@ -74,7 +76,7 @@
       "localAddresses": ["172.30.20.2/30"],
       "dns": ["1.1.1.1"],
       "credentials": {
-        "configFile": "/etc/debian-router/xray/xray-global.json"
+        "configFile": "/etc/las/xray/xray-global.json"
       },
       "options": {
         "engine": "xray",
@@ -85,6 +87,70 @@
   ],
   "routing": {
     "defaultPolicy": "wan",
+    "sets": [
+      {
+        "id": "geo-ir",
+        "name": "Iran destination IPs",
+        "type": "country",
+        "enabled": true,
+        "description": "Route Iranian destination IPs to a dedicated SD-WAN or WAN group.",
+        "countries": ["IR"],
+        "cidrs": ["5.52.0.0/14", "185.143.232.0/22"],
+        "domains": [],
+        "sourceUrls": ["https://example.invalid/geoip-ir.txt"],
+        "refresh": "24h"
+      },
+      {
+        "id": "svc-telegram",
+        "name": "Telegram CIDRs",
+        "type": "service",
+        "enabled": true,
+        "description": "Telegram service routes. Replace examples with an authoritative feed.",
+        "countries": [],
+        "cidrs": ["91.108.4.0/22", "149.154.160.0/20"],
+        "domains": ["telegram.org", "t.me"],
+        "sourceUrls": [],
+        "refresh": "24h"
+      },
+      {
+        "id": "svc-whatsapp",
+        "name": "WhatsApp CIDRs",
+        "type": "service",
+        "enabled": true,
+        "description": "WhatsApp service routes. Replace examples with an authoritative Meta feed.",
+        "countries": [],
+        "cidrs": ["31.13.64.0/18", "157.240.0.0/16"],
+        "domains": ["whatsapp.com", "whatsapp.net"],
+        "sourceUrls": [],
+        "refresh": "24h"
+      }
+    ],
+    "wanGroups": [
+      {
+        "id": "sdwan-primary",
+        "name": "Primary weighted SD-WAN",
+        "enabled": true,
+        "mode": "weighted-ecmp",
+        "mark": 8193,
+        "table": 201,
+        "members": [
+          {
+            "interface": "enp1s0",
+            "gateway": "",
+            "weight": 2,
+            "priority": 100,
+            "healthcheck": "1.1.1.1"
+          },
+          {
+            "interface": "wg-office",
+            "gateway": "",
+            "weight": 1,
+            "priority": 200,
+            "healthcheck": "10.60.0.1"
+          }
+        ]
+      }
+    ],
     "staticRoutes": [
       {
         "destination": "10.20.0.0/16",
@@ -109,7 +175,10 @@
           "protocols": ["tcp", "udp"],
           "tunnelIDs": [],
           "domains": [],
-          "geoIP": []
+          "geoIP": [],
+          "sets": [],
+          "applications": [],
+          "services": []
         },
         "action": {
           "type": "tunnel",
@@ -134,7 +203,10 @@
           "protocols": [],
           "tunnelIDs": [],
           "domains": [],
-          "geoIP": []
+          "geoIP": [],
+          "sets": [],
+          "applications": [],
+          "services": []
         },
         "action": {
           "type": "reject",
@@ -144,20 +216,156 @@
           "mark": 0,
           "table": 0
         }
+      },
+      {
+        "id": "iran-via-sdwan",
+        "name": "Iran destinations through SD-WAN group",
+        "enabled": true,
+        "priority": 300,
+        "match": {
+          "inputIface": "enp2s0",
+          "sourceCIDRs": ["192.168.88.0/24"],
+          "destinationCIDRs": [],
+          "sourcePorts": [],
+          "destinationPorts": [],
+          "protocols": [],
+          "tunnelIDs": [],
+          "domains": [],
+          "geoIP": ["IR"],
+          "sets": ["geo-ir"],
+          "applications": [],
+          "services": []
+        },
+        "action": {
+          "type": "wan-group",
+          "target": "sdwan-primary",
+          "nat": true,
+          "log": true,
+          "mark": 8193,
+          "table": 201
+        }
+      },
+      {
+        "id": "telegram-via-xray",
+        "name": "Telegram through Xray tunnel",
+        "enabled": true,
+        "priority": 310,
+        "match": {
+          "inputIface": "enp2s0",
+          "sourceCIDRs": ["192.168.88.0/24"],
+          "destinationCIDRs": [],
+          "sourcePorts": [],
+          "destinationPorts": [],
+          "protocols": [],
+          "tunnelIDs": [],
+          "domains": ["telegram.org", "t.me"],
+          "geoIP": [],
+          "sets": ["svc-telegram"],
+          "applications": ["telegram"],
+          "services": ["telegram"]
+        },
+        "action": {
+          "type": "tunnel",
+          "target": "xray-global",
+          "nat": true,
+          "log": true,
+          "mark": 4098,
+          "table": 102
+        }
+      },
+      {
+        "id": "whatsapp-via-sdwan",
+        "name": "WhatsApp through SD-WAN group",
+        "enabled": true,
+        "priority": 320,
+        "match": {
+          "inputIface": "enp2s0",
+          "sourceCIDRs": ["192.168.88.0/24"],
+          "destinationCIDRs": [],
+          "sourcePorts": [],
+          "destinationPorts": [],
+          "protocols": [],
+          "tunnelIDs": [],
+          "domains": ["whatsapp.com", "whatsapp.net"],
+          "geoIP": [],
+          "sets": ["svc-whatsapp"],
+          "applications": ["whatsapp"],
+          "services": ["whatsapp"]
+        },
+        "action": {
+          "type": "wan-group",
+          "target": "sdwan-primary",
+          "nat": true,
+          "log": true,
+          "mark": 8193,
+          "table": 201
+        }
       }
     ]
+  },
+  "services": {
+    "dhcpServer": {
+      "enabled": true,
+      "engine": "dnsmasq",
+      "listen": ["enp2s0"]
+    },
+    "dhcpClient": {
+      "enabled": true,
+      "interfaces": ["enp1s0"]
+    },
+    "dnsServer": {
+      "enabled": true,
+      "engine": "dnsmasq",
+      "listen": ["enp2s0"],
+      "forwarders": ["1.1.1.1", "9.9.9.9"],
+      "localDomains": ["lan"]
+    },
+    "dnsClient": {
+      "enabled": true,
+      "resolvers": ["1.1.1.1", "9.9.9.9"],
+      "search": ["lan"]
+    },
+    "ntpServer": {
+      "enabled": true,
+      "engine": "chrony",
+      "listen": ["enp2s0"]
+    },
+    "ntpClient": {
+      "enabled": true,
+      "servers": ["pool.ntp.org"]
+    },
+    "mpls": {
+      "enabled": false,
+      "interfaces": ["enp1s0", "wg-office"],
+      "ldp": true,
+      "vrf": ""
+    }
   },
   "security": {
     "nat": true,
     "firewall": true,
     "allowEstablished": true,
     "managementPorts": [22, 8088],
+    "portForwards": [
+      {
+        "id": "https-to-lan",
+        "name": "Forward WAN HTTPS to LAN server",
+        "enabled": false,
+        "inputIface": "enp1s0",
+        "protocols": ["tcp"],
+        "externalPort": 443,
+        "internalIp": "192.168.88.10",
+        "internalPort": 443,
+        "sourceCIDRs": [],
+        "log": true
+      }
+    ],
     "antivirus": {
       "enabled": false,
       "mode": "icap",
       "interfaces": ["enp2s0"],
       "maxFileSizeMB": 100,
-      "quarantineDir": "/var/lib/debian-router/quarantine"
+      "quarantineDir": "/var/lib/las/quarantine"
     },
     "ips": {
       "enabled": false,
@@ -173,4 +381,3 @@
     }
   }
 }
-

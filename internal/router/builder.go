@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"debian-router/internal/config"
-	"debian-router/internal/control"
+	"github.com/NotABaguette/LAS/internal/config"
+	"github.com/NotABaguette/LAS/internal/control"
 )
 
 func BuildPlan(cfg config.Config) (control.Plan, error) {
@@ -20,14 +20,15 @@ func BuildPlan(cfg config.Config) (control.Plan, error) {
 	addInterfacePlan(&plan, cfg.Interfaces)
 	addTunnelPlan(&plan, cfg.Tunnels)
 	addRoutingPlan(&plan, cfg)
+	addServicesPlan(&plan, cfg)
 	addSecurityPlan(&plan, cfg)
 
 	nft, warnings := BuildNftables(cfg)
 	for _, warning := range warnings {
 		plan.AddWarning(warning)
 	}
-	plan.AddWrite("render nftables policy", "/run/debian-router/nftables.conf", "0600", nft)
-	plan.AddCommand("load nftables policy", "sh", "-c", "nft list table inet debian_router >/dev/null 2>&1 && nft delete table inet debian_router || true; nft -f /run/debian-router/nftables.conf")
+	plan.AddWrite("render nftables policy", "/run/las/nftables.conf", "0600", nft)
+	plan.AddCommand("load nftables policy", "sh", "-c", "nft list table inet las_router >/dev/null 2>&1 && nft delete table inet las_router || true; nft -f /run/las/nftables.conf")
 
 	return plan, nil
 }
@@ -134,7 +135,7 @@ func addTunnelPlan(plan *control.Plan, tunnels []config.Tunnel) {
 			if tunnel.Type == "zerotier" {
 				service = "zerotier-one"
 			}
-			plan.AddWarning("%s tunnel %s is managed by its own control plane; debian-routerd routes traffic into %s", tunnel.Type, tunnel.ID, tunnel.InterfaceName)
+			plan.AddWarning("%s tunnel %s is managed by its own control plane; lasd routes traffic into %s", tunnel.Type, tunnel.ID, tunnel.InterfaceName)
 			plan.AddCommand("enable "+service+" service", "systemctl", "enable", "--now", service)
 		case "custom":
 			service := tunnel.Options["service"]
@@ -234,6 +235,13 @@ func shellQuote(value string) string {
 }
 
 func addRoutingPlan(plan *control.Plan, cfg config.Config) {
+	for _, group := range cfg.Routing.WANGroups {
+		if !group.Enabled {
+			continue
+		}
+		addWANGroupPlan(plan, group)
+	}
+
 	for _, route := range cfg.Routing.StaticRoutes {
 		args := []string{"route", "replace", route.Destination}
 		if route.Gateway != "" {
@@ -259,7 +267,7 @@ func addRoutingPlan(plan *control.Plan, cfg config.Config) {
 		if !rule.Enabled {
 			continue
 		}
-		mark, table := resolveRuleRoute(rule, cfg.Tunnels)
+		mark, table := resolveRuleRouteWithGroups(rule, cfg.Tunnels, cfg.Routing.WANGroups)
 		if mark == 0 || table == 0 {
 			continue
 		}
@@ -274,21 +282,89 @@ func addSecurityPlan(plan *control.Plan, cfg config.Config) {
 		switch security.IPS.Engine {
 		case "", "suricata":
 			content := renderSuricataConfig(security.IPS)
-			plan.AddWrite("render Suricata interface config", "/etc/debian-router/suricata.yaml", "0600", content)
+			plan.AddWrite("render Suricata interface config", "/etc/las/suricata.yaml", "0600", content)
 			plan.AddCommand("enable Suricata IPS", "systemctl", "enable", "--now", "suricata")
 		default:
 			plan.AddWarning("unsupported IPS engine %q; expected suricata", security.IPS.Engine)
 		}
 	}
 	if security.Antivirus.Enabled {
-		plan.AddWrite("render ClamAV router profile", "/etc/debian-router/clamav-router.conf", "0600", renderClamAVConfig(security.Antivirus))
+		plan.AddWrite("render ClamAV router profile", "/etc/las/clamav-router.conf", "0600", renderClamAVConfig(security.Antivirus))
 		plan.AddCommand("enable ClamAV daemon", "systemctl", "enable", "--now", "clamav-daemon")
 		plan.AddWarning("antivirus mode %s requires a proxy/ICAP integration point; encrypted pass-through traffic cannot be scanned transparently", security.Antivirus.Mode)
 	}
 	if security.DNSFiltering.Enabled {
-		plan.AddWrite("render dnsmasq filtering profile", "/etc/debian-router/dnsmasq-router.conf", "0600", renderDNSMasqConfig(security.DNSFiltering))
+		plan.AddWrite("render dnsmasq filtering profile", "/etc/las/dnsmasq-router.conf", "0600", renderDNSMasqConfig(security.DNSFiltering))
 		plan.AddCommand("enable dnsmasq", "systemctl", "enable", "--now", "dnsmasq")
 	}
+}
+
+func addServicesPlan(plan *control.Plan, cfg config.Config) {
+	services := cfg.Services
+	if services.DHCPServer.Enabled || services.DNSServer.Enabled {
+		plan.AddWrite("render dnsmasq service profile", "/etc/las/dnsmasq-services.conf", "0600", renderDNSDHCPConfig(cfg))
+		plan.AddCommand("enable dnsmasq for DHCP/DNS", "systemctl", "enable", "--now", "dnsmasq")
+		plan.AddWarning("dnsmasq renderer is a baseline service profile; full per-interface DHCP reservations, options, and DNS views are TODO")
+	}
+	if services.DHCPClient.Enabled {
+		plan.AddWarning("DHCP client is modeled on interfaces %s; use systemd-networkd, NetworkManager, or dhclient renderer TODO", strings.Join(services.DHCPClient.Interfaces, ","))
+	}
+	if services.NTPServer.Enabled || services.NTPClient.Enabled {
+		plan.AddWrite("render chrony profile", "/etc/las/chrony.conf", "0600", renderChronyConfig(services.NTPServer, services.NTPClient))
+		plan.AddCommand("enable chrony", "systemctl", "enable", "--now", "chrony")
+	}
+	if services.MPLS.Enabled {
+		plan.AddWarning("MPLS is modeled for links %s; enable kernel MPLS modules and complete FRR LDP/VPLS renderer TODO", strings.Join(services.MPLS.Interfaces, ","))
+		plan.AddCommand("enable FRR for MPLS/LDP", "systemctl", "enable", "--now", "frr")
+	}
+}
+
+func renderDNSDHCPConfig(cfg config.Config) string {
+	var b strings.Builder
+	b.WriteString("# Managed by LAS.\n")
+	if cfg.Services.DNSServer.Enabled {
+		b.WriteString("domain-needed\nbogus-priv\n")
+		for _, iface := range cfg.Services.DNSServer.Listen {
+			b.WriteString("interface=" + iface + "\n")
+		}
+		for _, forwarder := range cfg.Services.DNSServer.Forwarders {
+			b.WriteString("server=" + forwarder + "\n")
+		}
+		for _, domain := range cfg.Services.DNSServer.LocalDomains {
+			b.WriteString("local=/" + domain + "/\n")
+		}
+	}
+	if cfg.Services.DHCPServer.Enabled {
+		for _, iface := range cfg.Interfaces {
+			if iface.DHCPServer == nil {
+				continue
+			}
+			b.WriteString("interface=" + iface.Name + "\n")
+			b.WriteString(fmt.Sprintf("dhcp-range=%s,%s,%s\n", iface.DHCPServer.RangeStart, iface.DHCPServer.RangeEnd, iface.DHCPServer.LeaseTime))
+			for _, dns := range iface.DHCPServer.DNS {
+				b.WriteString("dhcp-option=option:dns-server," + dns + "\n")
+			}
+			if iface.DHCPServer.Domain != "" {
+				b.WriteString("domain=" + iface.DHCPServer.Domain + "\n")
+			}
+		}
+	}
+	return b.String()
+}
+
+func renderChronyConfig(server config.NTPServiceConfig, client config.NTPClientConfig) string {
+	var b strings.Builder
+	b.WriteString("# Managed by LAS.\n")
+	for _, upstream := range client.Servers {
+		b.WriteString("pool " + upstream + " iburst\n")
+	}
+	if server.Enabled {
+		for _, iface := range server.Listen {
+			b.WriteString("# serve NTP on " + iface + "\n")
+		}
+		b.WriteString("local stratum 10\n")
+	}
+	return b.String()
 }
 
 func resolveRuleRoute(rule config.RouteRule, tunnels []config.Tunnel) (int, int) {
@@ -310,6 +386,59 @@ func resolveRuleRoute(rule config.RouteRule, tunnels []config.Tunnel) (int, int)
 	return mark, table
 }
 
+func resolveRuleRouteWithGroups(rule config.RouteRule, tunnels []config.Tunnel, groups []config.WANGroup) (int, int) {
+	mark, table := resolveRuleRoute(rule, tunnels)
+	if rule.Action.Type == "wan-group" || rule.Action.Type == "load-balance" {
+		for _, group := range groups {
+			if group.ID == rule.Action.Target {
+				if mark == 0 {
+					mark = group.Mark
+				}
+				if table == 0 {
+					table = group.Table
+				}
+				break
+			}
+		}
+	}
+	return mark, table
+}
+
+func addWANGroupPlan(plan *control.Plan, group config.WANGroup) {
+	if group.Table == 0 {
+		plan.AddWarning("WAN group %s is enabled without table; it can be edited but cannot install a routing table", group.ID)
+		return
+	}
+
+	if group.Mode == "weighted-ecmp" {
+		args := []string{"route", "replace", "default", "table", strconv.Itoa(group.Table)}
+		for _, member := range group.Members {
+			args = append(args, "nexthop")
+			if member.Gateway != "" {
+				args = append(args, "via", member.Gateway)
+			}
+			args = append(args, "dev", member.Interface)
+			if member.Weight > 0 {
+				args = append(args, "weight", strconv.Itoa(member.Weight))
+			}
+		}
+		plan.AddCommand("install weighted WAN group "+group.ID, "ip", args...)
+		return
+	}
+
+	for _, member := range group.Members {
+		metric := member.Priority
+		if metric == 0 {
+			metric = 100
+		}
+		args := []string{"route", "replace", "default", "table", strconv.Itoa(group.Table), "dev", member.Interface, "metric", strconv.Itoa(metric)}
+		if member.Gateway != "" {
+			args = append([]string{"route", "replace", "default", "table", strconv.Itoa(group.Table), "via", member.Gateway}, "dev", member.Interface, "metric", strconv.Itoa(metric))
+		}
+		plan.AddCommand("install failover WAN member "+group.ID+"/"+member.Interface, "ip", args...)
+	}
+}
+
 func renderSuricataConfig(ips config.IPSConfig) string {
 	var b strings.Builder
 	b.WriteString("%YAML 1.1\n---\n")
@@ -328,7 +457,7 @@ func renderSuricataConfig(ips config.IPSConfig) string {
 
 func renderClamAVConfig(av config.AntivirusConfig) string {
 	var b strings.Builder
-	b.WriteString("# Managed by debian-routerd. Use this profile from an ICAP/proxy integration.\n")
+	b.WriteString("# Managed by lasd. Use this profile from an ICAP/proxy integration.\n")
 	b.WriteString(fmt.Sprintf("mode=%s\n", av.Mode))
 	b.WriteString(fmt.Sprintf("max_file_size_mb=%d\n", av.MaxFileSizeMB))
 	b.WriteString(fmt.Sprintf("quarantine_dir=%s\n", av.QuarantineDir))
@@ -338,7 +467,7 @@ func renderClamAVConfig(av config.AntivirusConfig) string {
 
 func renderDNSMasqConfig(dns config.DNSFilteringConf) string {
 	var b strings.Builder
-	b.WriteString("# Managed by debian-routerd.\n")
+	b.WriteString("# Managed by lasd.\n")
 	b.WriteString("domain-needed\nbogus-priv\n")
 	for _, upstream := range dns.Upstream {
 		b.WriteString("server=" + upstream + "\n")

@@ -1,0 +1,13 @@
+[Unit]
+Description=LAS periodic system and core updater
+Documentation=file:/usr/share/las/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/las-updater
+ExecStart=/usr/local/sbin/las-update
+User=root
+Group=root
+

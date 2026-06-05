@@ -14,7 +14,9 @@ const titles = {
   interfaces: "Interfaces",
   tunnels: "Tunnels",
   rules: "Policy Rules",
+  services: "Services",
   security: "Security",
+  diagnostics: "Diagnostics",
   raw: "Raw Config",
 };
 
@@ -52,7 +54,9 @@ function render() {
     interfaces: renderInterfaces,
     tunnels: renderTunnels,
     rules: renderRules,
+    services: renderServices,
     security: renderSecurity,
+    diagnostics: renderDiagnostics,
     raw: renderRaw,
   };
   content.innerHTML = "";
@@ -152,6 +156,7 @@ function renderTunnels() {
       textField("ID", tunnel.id, (value) => tunnel.id = value),
       textField("Name", tunnel.name, (value) => tunnel.name = value),
       selectField("Type", tunnel.type, ["tun", "wireguard", "openvpn", "ipsec", "ipsec-vti", "vti", "l2tp", "l2tp-ipsec", "pptp", "sstp", "pppoe", "gre", "gretap", "eoip", "ipip", "sit", "6to4", "ip6gre", "ip6tnl", "erspan", "vxlan", "l2tpv3", "vless", "vmess", "vless-xhttp", "xhttp", "xray", "sing-box", "tailscale", "zerotier", "custom"], (value) => tunnel.type = value),
+      selectField("Direction", tunnel.direction, ["client", "server", "peer"], (value) => tunnel.direction = value),
       checkboxField("Enabled", tunnel.enabled, (value) => tunnel.enabled = value),
       textField("Interface", tunnel.interfaceName, (value) => tunnel.interfaceName = value),
       textField("Remote endpoint", tunnel.remoteEndpoint, (value) => tunnel.remoteEndpoint = value),
@@ -171,6 +176,7 @@ function renderTunnels() {
       id: `tun-${state.config.tunnels.length + 1}`,
       name: "New tunnel",
       type: "wireguard",
+      direction: "client",
       enabled: false,
       interfaceName: `wg${state.config.tunnels.length}`,
       mark: 4096 + state.config.tunnels.length + 1,
@@ -189,9 +195,14 @@ function renderTunnels() {
 
 function renderRules() {
   const root = el("div", "grid");
+  state.config.routing.sets = state.config.routing.sets || [];
+  state.config.routing.wanGroups = state.config.routing.wanGroups || [];
   const rules = state.config.routing.rules;
   rules.sort((a, b) => a.priority - b.priority);
   rules.forEach((rule, index) => {
+    rule.match.sets = rule.match.sets || [];
+    rule.match.applications = rule.match.applications || [];
+    rule.match.services = rule.match.services || [];
     const item = card(rule.name || rule.id || `Rule ${index + 1}`, "full");
     item.append(formGrid([
       textField("ID", rule.id, (value) => rule.id = value),
@@ -208,7 +219,10 @@ function renderRules() {
       listField("Tunnel match IDs", rule.match.tunnelIDs, (value) => rule.match.tunnelIDs = value),
       listField("Domains", rule.match.domains, (value) => rule.match.domains = value),
       listField("GeoIP", rule.match.geoIP, (value) => rule.match.geoIP = value),
-      selectField("Action", rule.action.type, ["direct", "interface", "tunnel", "blackhole", "reject", "scan", "mirror"], (value) => rule.action.type = value),
+      listField("Route sets", rule.match.sets, (value) => rule.match.sets = value, "Match destination IPs from route sets such as iran, telegram, whatsapp."),
+      listField("Applications", rule.match.applications, (value) => rule.match.applications = value, "Labels for app-aware feed mapping."),
+      listField("Services", rule.match.services, (value) => rule.match.services = value, "Labels for service-aware feed mapping."),
+      selectField("Action", rule.action.type, ["direct", "interface", "tunnel", "wan-group", "load-balance", "blackhole", "reject", "scan", "mirror"], (value) => rule.action.type = value),
       textField("Target", rule.action.target, (value) => rule.action.target = value),
       checkboxField("NAT", rule.action.nat, (value) => rule.action.nat = value),
       checkboxField("Log", rule.action.log, (value) => rule.action.log = value),
@@ -227,6 +241,70 @@ function renderRules() {
     ]));
     root.append(item);
   });
+
+  const sets = card("Geo / App / Service Route Sets", "full");
+  state.config.routing.sets.forEach((routeSet, index) => {
+    const row = el("div", "card full");
+    row.append(formGrid([
+      textField("ID", routeSet.id, (value) => routeSet.id = value),
+      textField("Name", routeSet.name, (value) => routeSet.name = value),
+      selectField("Type", routeSet.type, ["country", "application", "service", "custom"], (value) => routeSet.type = value),
+      checkboxField("Enabled", routeSet.enabled, (value) => routeSet.enabled = value),
+      textField("Description", routeSet.description, (value) => routeSet.description = value),
+      listField("Countries", routeSet.countries, (value) => routeSet.countries = value, "ISO country codes, e.g. IR."),
+      listField("Static CIDRs", routeSet.cidrs, (value) => routeSet.cidrs = value, "CIDRs rendered directly into nftables sets."),
+      listField("Domains", routeSet.domains, (value) => routeSet.domains = value, "Domains that a feed generator can resolve into CIDRs."),
+      listField("Source URLs", routeSet.sourceUrls, (value) => routeSet.sourceUrls = value, "Feed URLs for GeoIP/app/service CIDRs."),
+      textField("Refresh", routeSet.refresh, (value) => routeSet.refresh = value, "Example: 24h"),
+    ]));
+    row.append(actions([["Remove set", () => removeAt(state.config.routing.sets, index), "danger"]]));
+    sets.append(row);
+  });
+  sets.append(actions([["Add route set", () => {
+    state.config.routing.sets.push({
+      id: `set-${state.config.routing.sets.length + 1}`,
+      name: "New route set",
+      type: "custom",
+      enabled: true,
+      description: "",
+      countries: [],
+      cidrs: [],
+      domains: [],
+      sourceUrls: [],
+      refresh: "24h",
+    });
+    render();
+  }]]));
+  root.append(sets);
+
+  const wanGroups = card("WAN Load Balancing Groups", "full");
+  state.config.routing.wanGroups.forEach((group, index) => {
+    const row = el("div", "card full");
+    row.append(formGrid([
+      textField("ID", group.id, (value) => group.id = value),
+      textField("Name", group.name, (value) => group.name = value),
+      checkboxField("Enabled", group.enabled, (value) => group.enabled = value),
+      selectField("Mode", group.mode, ["weighted-ecmp", "failover", "active-backup"], (value) => group.mode = value),
+      numberField("Fwmark", group.mark, (value) => group.mark = value),
+      numberField("Routing table", group.table, (value) => group.table = value),
+      wanMembersField("Members", group.members, (value) => group.members = value),
+    ]));
+    row.append(actions([["Remove WAN group", () => removeAt(state.config.routing.wanGroups, index), "danger"]]));
+    wanGroups.append(row);
+  });
+  wanGroups.append(actions([["Add WAN group", () => {
+    state.config.routing.wanGroups.push({
+      id: `wan-group-${state.config.routing.wanGroups.length + 1}`,
+      name: "New WAN group",
+      enabled: true,
+      mode: "weighted-ecmp",
+      mark: 8192 + state.config.routing.wanGroups.length + 1,
+      table: 200 + state.config.routing.wanGroups.length + 1,
+      members: [{ interface: "enp1s0", gateway: "", weight: 1, priority: 100, healthcheck: "1.1.1.1" }],
+    });
+    render();
+  }]]));
+  root.append(wanGroups);
 
   const staticRoutes = card("Static Routes", "full");
   state.config.routing.staticRoutes.forEach((route, index) => {
@@ -254,9 +332,65 @@ function renderRules() {
   return root;
 }
 
+function renderServices() {
+  const services = state.config.services || (state.config.services = {});
+  services.dhcpServer = services.dhcpServer || { enabled: false, engine: "dnsmasq", listen: [] };
+  services.dhcpClient = services.dhcpClient || { enabled: true, interfaces: [] };
+  services.dnsServer = services.dnsServer || { enabled: false, engine: "dnsmasq", listen: [], forwarders: [], localDomains: [] };
+  services.dnsClient = services.dnsClient || { enabled: true, resolvers: [], search: [] };
+  services.ntpServer = services.ntpServer || { enabled: false, engine: "chrony", listen: [] };
+  services.ntpClient = services.ntpClient || { enabled: true, servers: [] };
+  services.mpls = services.mpls || { enabled: false, interfaces: [], ldp: false, vrf: "" };
+
+  const root = el("div", "grid");
+  const dhcp = card("DHCP", "full");
+  dhcp.append(formGrid([
+    checkboxField("DHCP server enabled", services.dhcpServer.enabled, (value) => services.dhcpServer.enabled = value),
+    selectField("DHCP server engine", services.dhcpServer.engine, ["dnsmasq", "kea"], (value) => services.dhcpServer.engine = value),
+    listField("DHCP server listen links", services.dhcpServer.listen, (value) => services.dhcpServer.listen = value),
+    checkboxField("DHCP client enabled", services.dhcpClient.enabled, (value) => services.dhcpClient.enabled = value),
+    listField("DHCP client interfaces", services.dhcpClient.interfaces, (value) => services.dhcpClient.interfaces = value),
+  ]));
+  root.append(dhcp);
+
+  const dns = card("DNS", "full");
+  dns.append(formGrid([
+    checkboxField("DNS server enabled", services.dnsServer.enabled, (value) => services.dnsServer.enabled = value),
+    selectField("DNS server engine", services.dnsServer.engine, ["dnsmasq", "unbound", "bind"], (value) => services.dnsServer.engine = value),
+    listField("DNS listen links", services.dnsServer.listen, (value) => services.dnsServer.listen = value),
+    listField("DNS forwarders", services.dnsServer.forwarders, (value) => services.dnsServer.forwarders = value),
+    listField("Local domains", services.dnsServer.localDomains, (value) => services.dnsServer.localDomains = value),
+    checkboxField("DNS client enabled", services.dnsClient.enabled, (value) => services.dnsClient.enabled = value),
+    listField("Client resolvers", services.dnsClient.resolvers, (value) => services.dnsClient.resolvers = value),
+    listField("Search domains", services.dnsClient.search, (value) => services.dnsClient.search = value),
+  ]));
+  root.append(dns);
+
+  const ntp = card("NTP", "full");
+  ntp.append(formGrid([
+    checkboxField("NTP server enabled", services.ntpServer.enabled, (value) => services.ntpServer.enabled = value),
+    selectField("NTP engine", services.ntpServer.engine, ["chrony", "ntpd"], (value) => services.ntpServer.engine = value),
+    listField("NTP server listen links", services.ntpServer.listen, (value) => services.ntpServer.listen = value),
+    checkboxField("NTP client enabled", services.ntpClient.enabled, (value) => services.ntpClient.enabled = value),
+    listField("NTP upstream servers", services.ntpClient.servers, (value) => services.ntpClient.servers = value),
+  ]));
+  root.append(ntp);
+
+  const mpls = card("MPLS", "full");
+  mpls.append(formGrid([
+    checkboxField("MPLS enabled", services.mpls.enabled, (value) => services.mpls.enabled = value),
+    listField("MPLS links", services.mpls.interfaces, (value) => services.mpls.interfaces = value),
+    checkboxField("LDP enabled", services.mpls.ldp, (value) => services.mpls.ldp = value),
+    textField("VRF", services.mpls.vrf, (value) => services.mpls.vrf = value),
+  ]));
+  root.append(mpls);
+  return root;
+}
+
 function renderSecurity() {
   const sec = state.config.security;
   const root = el("div", "grid");
+  sec.portForwards = sec.portForwards || [];
 
   const base = card("Firewall and NAT", "full");
   base.append(formGrid([
@@ -266,6 +400,41 @@ function renderSecurity() {
     listField("Management ports", sec.managementPorts, (value) => sec.managementPorts = value.map(Number).filter(Boolean)),
   ]));
   root.append(base);
+
+  const forwards = card("Port Forwarding", "full");
+  sec.portForwards.forEach((forward, index) => {
+    const row = el("div", "card full");
+    row.append(formGrid([
+      textField("ID", forward.id, (value) => forward.id = value),
+      textField("Name", forward.name, (value) => forward.name = value),
+      checkboxField("Enabled", forward.enabled, (value) => forward.enabled = value),
+      textField("Input iface", forward.inputIface, (value) => forward.inputIface = value),
+      listField("Protocols", forward.protocols, (value) => forward.protocols = value, "tcp and/or udp"),
+      numberField("External port", forward.externalPort, (value) => forward.externalPort = value),
+      textField("Internal IP", forward.internalIp, (value) => forward.internalIp = value),
+      numberField("Internal port", forward.internalPort, (value) => forward.internalPort = value),
+      listField("Allowed source CIDRs", forward.sourceCIDRs, (value) => forward.sourceCIDRs = value),
+      checkboxField("Log", forward.log, (value) => forward.log = value),
+    ]));
+    row.append(actions([["Remove port forward", () => removeAt(sec.portForwards, index), "danger"]]));
+    forwards.append(row);
+  });
+  forwards.append(actions([["Add port forward", () => {
+    sec.portForwards.push({
+      id: `pf-${sec.portForwards.length + 1}`,
+      name: "New port forward",
+      enabled: true,
+      inputIface: "enp1s0",
+      protocols: ["tcp"],
+      externalPort: 443,
+      internalIp: "192.168.88.10",
+      internalPort: 443,
+      sourceCIDRs: [],
+      log: true,
+    });
+    render();
+  }]]));
+  root.append(forwards);
 
   const ips = card("IPS", "third");
   ips.append(formGrid([
@@ -295,6 +464,37 @@ function renderSecurity() {
   ]));
   root.append(dns);
 
+  return root;
+}
+
+function renderDiagnostics() {
+  const root = el("div", "grid");
+  const item = card("Network Diagnostics", "full");
+  const tool = selectField("Tool", "ping", ["ping", "traceroute", "curl-head", "dig", "route"], () => {});
+  const target = textField("Target", "1.1.1.1", () => {}, "IP, hostname, or http(s) URL for curl-head.");
+  const count = numberField("Ping count", 4, () => {});
+  const form = formGrid([tool, target, count]);
+  const button = el("button", "primary", "Run diagnostic");
+  button.type = "button";
+  button.addEventListener("click", async () => {
+    const request = {
+      tool: tool.querySelector("select").value,
+      target: target.querySelector("input").value,
+      count: Number(count.querySelector("input").value || 4),
+    };
+    try {
+      const result = await api("/api/diagnostics", {
+        method: "POST",
+        body: JSON.stringify(request),
+      });
+      output.textContent = JSON.stringify(result, null, 2);
+      message("Diagnostic completed.");
+    } catch (error) {
+      message(error.message, true);
+    }
+  });
+  item.append(form, actions([["Run diagnostic", () => button.click()]]));
+  root.append(item);
   return root;
 }
 
@@ -414,6 +614,16 @@ function portsField(labelText, value, onChange) {
   return wrap;
 }
 
+function wanMembersField(labelText, value, onChange) {
+  const wrap = fieldWrap(labelText, "One per line: iface,gateway,weight,priority,healthcheck");
+  wrap.classList.add("full");
+  const input = el("textarea");
+  input.value = formatWANMembers(value || []);
+  input.addEventListener("input", (event) => onChange(parseWANMembers(event.target.value)));
+  wrap.append(input);
+  return wrap;
+}
+
 function kvField(labelText, value, onChange) {
   const wrap = fieldWrap(labelText, "key=value per line.");
   wrap.classList.add("full");
@@ -478,6 +688,9 @@ function newRule() {
       tunnelIDs: [],
       domains: [],
       geoIP: [],
+      sets: [],
+      applications: [],
+      services: [],
     },
     action: {
       type: "direct",
@@ -503,6 +716,29 @@ function parsePorts(value) {
 
 function formatPorts(value) {
   return value.map((range) => range.from === range.to ? `${range.from}` : `${range.from}-${range.to}`).join("\n");
+}
+
+function parseWANMembers(value) {
+  return value.split("\n").map((line) => {
+    const [iface, gateway = "", weight = "1", priority = "100", healthcheck = ""] = line.split(",").map((part) => part.trim());
+    return {
+      interface: iface,
+      gateway,
+      weight: Number(weight || 1),
+      priority: Number(priority || 100),
+      healthcheck,
+    };
+  }).filter((member) => member.interface);
+}
+
+function formatWANMembers(value) {
+  return value.map((member) => [
+    member.interface || "",
+    member.gateway || "",
+    member.weight || 1,
+    member.priority || 100,
+    member.healthcheck || "",
+  ].join(",")).join("\n");
 }
 
 function parseKV(value) {

@@ -1,0 +1,22 @@
+[Unit]
+Description=LAS Control Plane
+Documentation=file:/usr/share/las/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/lasd --config /etc/las/router.json --web-dir /usr/share/las/web --apply
+Restart=on-failure
+RestartSec=3s
+User=root
+Group=root
+NoNewPrivileges=false
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/etc/las /run/las /var/lib/las
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+

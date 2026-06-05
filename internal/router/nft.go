@@ -7,22 +7,80 @@ import (
 	"strconv"
 	"strings"
 
-	"debian-router/internal/config"
+	"github.com/NotABaguette/LAS/internal/config"
 )
 
 func BuildNftables(cfg config.Config) (string, []string) {
 	var b strings.Builder
 	var warnings []string
 
-	b.WriteString("# Managed by debian-routerd. Manual edits will be overwritten.\n")
-	b.WriteString("table inet debian_router {\n")
+	b.WriteString("# Managed by lasd. Manual edits will be overwritten.\n")
+	b.WriteString("table inet las_router {\n")
+	writeRouteSets(&b, cfg.Routing.Sets, &warnings)
 	writeInputChain(&b, cfg)
+	writeDstNATChain(&b, cfg)
 	writePreroutingChain(&b, cfg, &warnings)
 	writeForwardChain(&b, cfg, &warnings)
 	writePostroutingChain(&b, cfg)
 	b.WriteString("}\n")
 
 	return b.String(), warnings
+}
+
+func writeRouteSets(b *strings.Builder, sets []config.RouteSet, warnings *[]string) {
+	for _, routeSet := range sets {
+		if !routeSet.Enabled {
+			continue
+		}
+		if len(routeSet.SourceURLs) > 0 || len(routeSet.Countries) > 0 || len(routeSet.Domains) > 0 {
+			*warnings = append(*warnings, fmt.Sprintf("route set %s has dynamic inputs; run the feed generator before relying on generated nft elements", routeSet.ID))
+		}
+		v4, v6 := splitCIDRs(routeSet.CIDRs)
+		if len(v4) > 0 {
+			fmt.Fprintf(b, "  set %s_v4 {\n    type ipv4_addr; flags interval;\n    elements = %s\n  }\n", nftIdentifier(routeSet.ID), nftElements(v4))
+		}
+		if len(v6) > 0 {
+			fmt.Fprintf(b, "  set %s_v6 {\n    type ipv6_addr; flags interval;\n    elements = %s\n  }\n", nftIdentifier(routeSet.ID), nftElements(v6))
+		}
+	}
+}
+
+func writeDstNATChain(b *strings.Builder, cfg config.Config) {
+	if !cfg.Security.NAT || len(cfg.Security.PortForwards) == 0 {
+		return
+	}
+	b.WriteString("  chain dstnat {\n    type nat hook prerouting priority dstnat; policy accept;\n")
+	for _, forward := range cfg.Security.PortForwards {
+		if !forward.Enabled {
+			continue
+		}
+		protos := forward.Protocols
+		if len(protos) == 0 {
+			protos = []string{"tcp"}
+		}
+		sourceExprs := portForwardSourceExpressions(forward.SourceCIDRs)
+		if len(sourceExprs) == 0 {
+			sourceExprs = []string{""}
+		}
+		for _, proto := range protos {
+			for _, sourceExpr := range sourceExprs {
+				parts := []string{}
+				if forward.InputIface != "" {
+					parts = append(parts, fmt.Sprintf("iifname %q", forward.InputIface))
+				}
+				if sourceExpr != "" {
+					parts = append(parts, sourceExpr)
+				}
+				parts = append(parts, fmt.Sprintf("%s dport %d", proto, forward.ExternalPort))
+				if forward.Log {
+					parts = append(parts, fmt.Sprintf("log prefix %q", "las port-forward "+forward.ID+" "))
+				}
+				parts = append(parts, fmt.Sprintf("dnat to %s:%d comment %q", forward.InternalIP, forward.InternalPort, forward.ID))
+				fmt.Fprintf(b, "    %s\n", strings.Join(parts, " "))
+			}
+		}
+	}
+	b.WriteString("  }\n")
 }
 
 func writeInputChain(b *strings.Builder, cfg config.Config) {
@@ -47,6 +105,18 @@ func writeInputChain(b *strings.Builder, cfg config.Config) {
 	b.WriteString("  }\n")
 }
 
+func portForwardSourceExpressions(cidrs []string) []string {
+	v4, v6 := splitCIDRs(cidrs)
+	var out []string
+	if len(v4) > 0 {
+		out = append(out, "ip saddr "+nftSet(v4))
+	}
+	if len(v6) > 0 {
+		out = append(out, "ip6 saddr "+nftSet(v6))
+	}
+	return out
+}
+
 func writePreroutingChain(b *strings.Builder, cfg config.Config, warnings *[]string) {
 	b.WriteString("  chain prerouting {\n    type filter hook prerouting priority mangle; policy accept;\n")
 
@@ -69,8 +139,8 @@ func writePreroutingChain(b *strings.Builder, cfg config.Config, warnings *[]str
 			*warnings = append(*warnings, fmt.Sprintf("rule %s has GeoIP match %q; generate country IP sets before enforcing", rule.ID, geo))
 		}
 
-		expressions := nftMatchExpressions(rule, warnings)
-		action := nftAction(rule, cfg.Tunnels)
+		expressions := nftMatchExpressions(rule, cfg.Routing.Sets, warnings)
+		action := nftAction(rule, cfg.Tunnels, cfg.Routing.WANGroups)
 		if action == "" {
 			continue
 		}
@@ -111,8 +181,8 @@ func writeForwardChain(b *strings.Builder, cfg config.Config, warnings *[]string
 		for _, geo := range rule.Match.GeoIP {
 			*warnings = append(*warnings, fmt.Sprintf("rule %s has GeoIP match %q; generate country IP sets before enforcing", rule.ID, geo))
 		}
-		expressions := nftMatchExpressions(rule, warnings)
-		action := nftAction(rule, cfg.Tunnels)
+		expressions := nftMatchExpressions(rule, cfg.Routing.Sets, warnings)
+		action := nftAction(rule, cfg.Tunnels, cfg.Routing.WANGroups)
 		if action == "" {
 			continue
 		}
@@ -139,14 +209,34 @@ func writePostroutingChain(b *strings.Builder, cfg config.Config) {
 		}
 	}
 	for _, rule := range cfg.Routing.Rules {
-		if rule.Enabled && rule.Action.NAT && rule.Action.Target != "" {
-			fmt.Fprintf(b, "    oifname %q masquerade comment %q\n", rule.Action.Target, "rule nat "+rule.ID)
+		if !rule.Enabled || !rule.Action.NAT || rule.Action.Target == "" {
+			continue
 		}
+		if rule.Action.Type == "wan-group" || rule.Action.Type == "load-balance" {
+			for _, group := range cfg.Routing.WANGroups {
+				if group.ID != rule.Action.Target {
+					continue
+				}
+				for _, member := range group.Members {
+					fmt.Fprintf(b, "    oifname %q masquerade comment %q\n", member.Interface, "rule nat "+rule.ID)
+				}
+			}
+			continue
+		}
+		if rule.Action.Type == "tunnel" {
+			for _, tunnel := range cfg.Tunnels {
+				if tunnel.ID == rule.Action.Target && tunnel.InterfaceName != "" {
+					fmt.Fprintf(b, "    oifname %q masquerade comment %q\n", tunnel.InterfaceName, "rule nat "+rule.ID)
+				}
+			}
+			continue
+		}
+		fmt.Fprintf(b, "    oifname %q masquerade comment %q\n", rule.Action.Target, "rule nat "+rule.ID)
 	}
 	b.WriteString("  }\n")
 }
 
-func nftMatchExpressions(rule config.RouteRule, warnings *[]string) []string {
+func nftMatchExpressions(rule config.RouteRule, routeSets []config.RouteSet, warnings *[]string) []string {
 	base := []string{}
 	if rule.Match.InputIface != "" {
 		base = append(base, fmt.Sprintf("iifname %q", rule.Match.InputIface))
@@ -169,19 +259,60 @@ func nftMatchExpressions(rule config.RouteRule, warnings *[]string) []string {
 	if len(cidrCombos) == 0 {
 		cidrCombos = []string{""}
 	}
+	setExprs := nftRouteSetExpressions(rule, routeSets, warnings)
+	if len(setExprs) == 0 {
+		setExprs = []string{""}
+	}
 
 	var out []string
 	for _, cidrExpr := range cidrCombos {
-		for _, portExpr := range portExprs {
-			parts := append([]string{}, base...)
-			if cidrExpr != "" {
-				parts = append(parts, cidrExpr)
+		for _, setExpr := range setExprs {
+			for _, portExpr := range portExprs {
+				parts := append([]string{}, base...)
+				if cidrExpr != "" {
+					parts = append(parts, cidrExpr)
+				}
+				if setExpr != "" {
+					parts = append(parts, setExpr)
+				}
+				if portExpr != "" {
+					parts = append(parts, portExpr)
+				}
+				out = append(out, strings.Join(parts, " "))
 			}
-			if portExpr != "" {
-				parts = append(parts, portExpr)
-			}
-			out = append(out, strings.Join(parts, " "))
 		}
+	}
+	return out
+}
+
+func nftRouteSetExpressions(rule config.RouteRule, routeSets []config.RouteSet, warnings *[]string) []string {
+	byID := map[string]config.RouteSet{}
+	for _, routeSet := range routeSets {
+		byID[routeSet.ID] = routeSet
+	}
+
+	var out []string
+	for _, setID := range rule.Match.Sets {
+		routeSet, exists := byID[setID]
+		if !exists || !routeSet.Enabled {
+			continue
+		}
+		v4, v6 := splitCIDRs(routeSet.CIDRs)
+		if len(v4) > 0 {
+			out = append(out, fmt.Sprintf("ip daddr @%s_v4", nftIdentifier(routeSet.ID)))
+		}
+		if len(v6) > 0 {
+			out = append(out, fmt.Sprintf("ip6 daddr @%s_v6", nftIdentifier(routeSet.ID)))
+		}
+		if len(v4) == 0 && len(v6) == 0 {
+			*warnings = append(*warnings, fmt.Sprintf("rule %s references route set %s, but it has no static CIDRs rendered into nftables yet", rule.ID, setID))
+		}
+	}
+	for _, app := range rule.Match.Applications {
+		*warnings = append(*warnings, fmt.Sprintf("rule %s application match %q needs a route set/feed mapping before enforcement", rule.ID, app))
+	}
+	for _, service := range rule.Match.Services {
+		*warnings = append(*warnings, fmt.Sprintf("rule %s service match %q needs a route set/feed mapping before enforcement", rule.ID, service))
 	}
 	return out
 }
@@ -238,21 +369,21 @@ func combineCIDRs(src4, src6, dst4, dst6 []string) []string {
 	return out
 }
 
-func nftAction(rule config.RouteRule, tunnels []config.Tunnel) string {
+func nftAction(rule config.RouteRule, tunnels []config.Tunnel, groups []config.WANGroup) string {
 	switch rule.Action.Type {
 	case "blackhole":
 		if rule.Action.Log {
-			return fmt.Sprintf("log prefix %q drop", "debian-router "+rule.ID+" ")
+			return fmt.Sprintf("log prefix %q drop", "las "+rule.ID+" ")
 		}
 		return "drop"
 	case "reject":
 		if rule.Action.Log {
-			return fmt.Sprintf("log prefix %q reject", "debian-router "+rule.ID+" ")
+			return fmt.Sprintf("log prefix %q reject", "las "+rule.ID+" ")
 		}
 		return "reject"
 	case "direct":
 		return "meta mark set 0 accept"
-	case "interface", "tunnel", "scan", "mirror":
+	case "interface", "tunnel", "wan-group", "load-balance", "scan", "mirror":
 		mark := rule.Action.Mark
 		if mark == 0 && rule.Action.Type == "tunnel" {
 			for _, tunnel := range tunnels {
@@ -262,16 +393,43 @@ func nftAction(rule config.RouteRule, tunnels []config.Tunnel) string {
 				}
 			}
 		}
+		if mark == 0 && (rule.Action.Type == "wan-group" || rule.Action.Type == "load-balance") {
+			for _, group := range groups {
+				if group.ID == rule.Action.Target {
+					mark = group.Mark
+					break
+				}
+			}
+		}
 		if mark == 0 {
 			return ""
 		}
 		if rule.Action.Log {
-			return fmt.Sprintf("log prefix %q meta mark set 0x%x accept", "debian-router "+rule.ID+" ", mark)
+			return fmt.Sprintf("log prefix %q meta mark set 0x%x accept", "las "+rule.ID+" ", mark)
 		}
 		return fmt.Sprintf("meta mark set 0x%x accept", mark)
 	default:
 		return ""
 	}
+}
+
+func nftIdentifier(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "rs_empty"
+	}
+	if out[0] >= '0' && out[0] <= '9' {
+		return "rs_" + out
+	}
+	return out
 }
 
 func isFilterAction(actionType string) bool {
@@ -307,6 +465,10 @@ func nftSet(values []string) string {
 	if len(values) == 1 {
 		return values[0]
 	}
+	return "{ " + strings.Join(values, ", ") + " }"
+}
+
+func nftElements(values []string) string {
 	return "{ " + strings.Join(values, ", ") + " }"
 }
 

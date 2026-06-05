@@ -17,6 +17,7 @@ type Config struct {
 	Interfaces []Interface    `json:"interfaces"`
 	Tunnels    []Tunnel       `json:"tunnels"`
 	Routing    RoutingConfig  `json:"routing"`
+	Services   ServicesConfig `json:"services"`
 	Security   SecurityConfig `json:"security"`
 }
 
@@ -58,6 +59,7 @@ type Tunnel struct {
 	ID             string            `json:"id"`
 	Name           string            `json:"name"`
 	Type           string            `json:"type"`
+	Direction      string            `json:"direction"`
 	Enabled        bool              `json:"enabled"`
 	InterfaceName  string            `json:"interfaceName"`
 	Mark           int               `json:"mark"`
@@ -72,8 +74,41 @@ type Tunnel struct {
 
 type RoutingConfig struct {
 	DefaultPolicy string        `json:"defaultPolicy"`
+	Sets          []RouteSet    `json:"sets"`
+	WANGroups     []WANGroup    `json:"wanGroups"`
 	StaticRoutes  []StaticRoute `json:"staticRoutes"`
 	Rules         []RouteRule   `json:"rules"`
+}
+
+type RouteSet struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Type        string   `json:"type"`
+	Enabled     bool     `json:"enabled"`
+	Description string   `json:"description"`
+	Countries   []string `json:"countries"`
+	CIDRs       []string `json:"cidrs"`
+	Domains     []string `json:"domains"`
+	SourceURLs  []string `json:"sourceUrls"`
+	Refresh     string   `json:"refresh"`
+}
+
+type WANGroup struct {
+	ID      string      `json:"id"`
+	Name    string      `json:"name"`
+	Enabled bool        `json:"enabled"`
+	Mode    string      `json:"mode"`
+	Mark    int         `json:"mark"`
+	Table   int         `json:"table"`
+	Members []WANMember `json:"members"`
+}
+
+type WANMember struct {
+	Interface   string `json:"interface"`
+	Gateway     string `json:"gateway"`
+	Weight      int    `json:"weight"`
+	Priority    int    `json:"priority"`
+	Healthcheck string `json:"healthcheck"`
 }
 
 type StaticRoute struct {
@@ -104,6 +139,9 @@ type RuleMatch struct {
 	TunnelIDs        []string    `json:"tunnelIDs"`
 	Domains          []string    `json:"domains"`
 	GeoIP            []string    `json:"geoIP"`
+	Sets             []string    `json:"sets"`
+	Applications     []string    `json:"applications"`
+	Services         []string    `json:"services"`
 }
 
 type PortRange struct {
@@ -125,9 +163,76 @@ type SecurityConfig struct {
 	Firewall         bool             `json:"firewall"`
 	AllowEstablished bool             `json:"allowEstablished"`
 	ManagementPorts  []int            `json:"managementPorts"`
+	PortForwards     []PortForward    `json:"portForwards"`
 	Antivirus        AntivirusConfig  `json:"antivirus"`
 	IPS              IPSConfig        `json:"ips"`
 	DNSFiltering     DNSFilteringConf `json:"dnsFiltering"`
+}
+
+type ServicesConfig struct {
+	DHCPServer DHCPServiceConfig `json:"dhcpServer"`
+	DHCPClient DHCPClientConfig  `json:"dhcpClient"`
+	DNSServer  DNSServiceConfig  `json:"dnsServer"`
+	DNSClient  DNSClientConfig   `json:"dnsClient"`
+	NTPServer  NTPServiceConfig  `json:"ntpServer"`
+	NTPClient  NTPClientConfig   `json:"ntpClient"`
+	MPLS       MPLSConfig        `json:"mpls"`
+}
+
+type DHCPServiceConfig struct {
+	Enabled bool     `json:"enabled"`
+	Engine  string   `json:"engine"`
+	Listen  []string `json:"listen"`
+}
+
+type DHCPClientConfig struct {
+	Enabled    bool     `json:"enabled"`
+	Interfaces []string `json:"interfaces"`
+}
+
+type DNSServiceConfig struct {
+	Enabled      bool     `json:"enabled"`
+	Engine       string   `json:"engine"`
+	Listen       []string `json:"listen"`
+	Forwarders   []string `json:"forwarders"`
+	LocalDomains []string `json:"localDomains"`
+}
+
+type DNSClientConfig struct {
+	Enabled   bool     `json:"enabled"`
+	Resolvers []string `json:"resolvers"`
+	Search    []string `json:"search"`
+}
+
+type NTPServiceConfig struct {
+	Enabled bool     `json:"enabled"`
+	Engine  string   `json:"engine"`
+	Listen  []string `json:"listen"`
+}
+
+type NTPClientConfig struct {
+	Enabled bool     `json:"enabled"`
+	Servers []string `json:"servers"`
+}
+
+type MPLSConfig struct {
+	Enabled    bool     `json:"enabled"`
+	Interfaces []string `json:"interfaces"`
+	LDP        bool     `json:"ldp"`
+	VRF        string   `json:"vrf"`
+}
+
+type PortForward struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Enabled      bool     `json:"enabled"`
+	InputIface   string   `json:"inputIface"`
+	Protocols    []string `json:"protocols"`
+	ExternalPort int      `json:"externalPort"`
+	InternalIP   string   `json:"internalIp"`
+	InternalPort int      `json:"internalPort"`
+	SourceCIDRs  []string `json:"sourceCIDRs"`
+	Log          bool     `json:"log"`
 }
 
 type AntivirusConfig struct {
@@ -156,7 +261,7 @@ func Default() Config {
 	return Config{
 		Version: CurrentVersion,
 		Host: HostConfig{
-			Hostname:        "debian-router",
+			Hostname:        "las",
 			ManagementCIDRs: []string{"192.168.88.0/24"},
 			EnableIPForward: true,
 			ConntrackMax:    262144,
@@ -185,18 +290,36 @@ func Default() Config {
 		},
 		Routing: RoutingConfig{
 			DefaultPolicy: "wan",
+			Sets:          []RouteSet{},
+			WANGroups:     []WANGroup{},
 			StaticRoutes:  []StaticRoute{},
 			Rules:         []RouteRule{},
+		},
+		Services: ServicesConfig{
+			DHCPServer: DHCPServiceConfig{Engine: "dnsmasq"},
+			DHCPClient: DHCPClientConfig{Enabled: true, Interfaces: []string{"enp1s0"}},
+			DNSServer: DNSServiceConfig{
+				Engine:     "dnsmasq",
+				Listen:     []string{"enp2s0"},
+				Forwarders: []string{"1.1.1.1", "9.9.9.9"},
+			},
+			DNSClient: DNSClientConfig{
+				Enabled:   true,
+				Resolvers: []string{"1.1.1.1", "9.9.9.9"},
+			},
+			NTPServer: NTPServiceConfig{Engine: "chrony", Listen: []string{"enp2s0"}},
+			NTPClient: NTPClientConfig{Enabled: true, Servers: []string{"pool.ntp.org"}},
 		},
 		Security: SecurityConfig{
 			NAT:              true,
 			Firewall:         true,
 			AllowEstablished: true,
 			ManagementPorts:  []int{22, 8088},
+			PortForwards:     []PortForward{},
 			Antivirus: AntivirusConfig{
 				Mode:          "icap",
 				MaxFileSizeMB: 100,
-				QuarantineDir: "/var/lib/debian-router/quarantine",
+				QuarantineDir: "/var/lib/las/quarantine",
 			},
 			IPS: IPSConfig{
 				Engine: "suricata",

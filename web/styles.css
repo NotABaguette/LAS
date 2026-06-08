@@ -346,6 +346,11 @@ textarea:focus {
   box-shadow: 0 0 0 3px rgba(182, 240, 111, 0.12);
 }
 
+textarea.invalid {
+  border-color: rgba(255, 94, 94, 0.85);
+  box-shadow: 0 0 0 3px rgba(255, 94, 94, 0.14);
+}
+
 .switch-row {
   display: flex;
   gap: 12px;
@@ -484,4 +489,3 @@ textarea:focus {
     }
   }
 }
-

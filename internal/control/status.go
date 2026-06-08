@@ -19,16 +19,26 @@ func ProbeStatus(ctx context.Context) HostStatus {
 	status := HostStatus{
 		Platform: runtime.GOOS + "/" + runtime.GOARCH,
 		Commands: map[string]string{
-			"ip":       commandVersion(ctx, "ip", "-V"),
-			"nft":      commandVersion(ctx, "nft", "--version"),
-			"wg":       commandVersion(ctx, "wg", "--version"),
+			"ip":      commandVersion(ctx, "ip", "-V"),
+			"nft":     commandVersion(ctx, "nft", "--version"),
+			"wg":      commandVersion(ctx, "wg", "--version"),
+			"openvpn": commandVersion(ctx, "openvpn", "--version"),
+			"openconnect": commandVersion(ctx, "openconnect",
+				"--version"),
+			"openfortivpn": commandVersion(ctx, "openfortivpn",
+				"--version"),
 			"xray":     commandVersion(ctx, "xray", "version"),
 			"sing-box": commandVersion(ctx, "sing-box", "version"),
 			"curl":     commandVersion(ctx, "curl", "--version"),
 			"dig":      commandVersion(ctx, "dig", "-v"),
 			"traceroute": commandVersion(ctx, "traceroute",
 				"--version"),
+			"dnsmasq":  commandVersion(ctx, "dnsmasq", "--version"),
+			"unbound":  commandVersion(ctx, "unbound", "-V"),
+			"bind":     commandVersion(ctx, "named", "-v"),
 			"chrony":   commandVersion(ctx, "chronyd", "-v"),
+			"ntpsec":   commandVersion(ctx, "ntpd", "--version"),
+			"certbot":  commandVersion(ctx, "certbot", "--version"),
 			"frr":      commandVersion(ctx, "vtysh", "-v"),
 			"suricata": commandVersion(ctx, "suricata", "--build-info"),
 			"clamd":    commandVersion(ctx, "clamd", "--version"),
@@ -38,7 +48,7 @@ func ProbeStatus(ctx context.Context) HostStatus {
 	}
 
 	if runtime.GOOS == "linux" {
-		for _, service := range []string{"lasd", "las-updater.timer", "nftables", "dnsmasq", "chrony", "frr", "suricata", "clamav-daemon", "strongswan", "xl2tpd", "openvpn", "xray", "sing-box"} {
+		for _, service := range []string{"lasd", "las-updater.timer", "nftables", "dnsmasq", "unbound", "bind9", "chrony", "ntpsec", "certbot.timer", "frr", "suricata", "clamav-daemon", "strongswan", "xl2tpd", "openvpn", "xray", "sing-box"} {
 			status.Services[service] = commandVersion(ctx, "systemctl", "is-active", service)
 		}
 	}

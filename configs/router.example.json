@@ -83,6 +83,78 @@
         "transport": "xhttp",
         "sni": "example.net"
       }
+    },
+    {
+      "id": "ovpn-remote",
+      "name": "Remote OpenVPN",
+      "type": "openvpn",
+      "direction": "client",
+      "enabled": false,
+      "interfaceName": "tun-ovpn0",
+      "mark": 4099,
+      "table": 103,
+      "mtu": 1500,
+      "remoteEndpoint": "ovpn.example.com:1194",
+      "localAddresses": [],
+      "dns": ["10.8.0.1"],
+      "credentials": {
+        "caFile": "/etc/las/certs/ca.crt",
+        "certFile": "/etc/las/openvpn/ovpn-remote.crt",
+        "keyFile": "/etc/las/openvpn/ovpn-remote.key",
+        "authFile": "/etc/las/openvpn/ovpn-remote.auth"
+      },
+      "options": {
+        "proto": "udp",
+        "routeNoPull": "true",
+        "dataCiphers": "AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305"
+      }
+    },
+    {
+      "id": "anyconnect-corp",
+      "name": "Corporate OpenConnect",
+      "type": "openconnect",
+      "direction": "client",
+      "enabled": false,
+      "interfaceName": "tun-oc0",
+      "mark": 4100,
+      "table": 104,
+      "mtu": 1406,
+      "remoteEndpoint": "https://vpn.example.com",
+      "localAddresses": [],
+      "dns": ["10.9.0.1"],
+      "credentials": {
+        "username": "vpn-user",
+        "passwordFile": "/etc/las/openconnect/anyconnect-corp.pass",
+        "caFile": "/etc/las/certs/corp-ca.crt"
+      },
+      "options": {
+        "protocol": "anyconnect",
+        "serverCert": "",
+        "script": "/etc/vpnc/vpnc-script"
+      }
+    },
+    {
+      "id": "fortigate-branch",
+      "name": "Branch FortiGate SSL VPN",
+      "type": "fortigate-ssl",
+      "direction": "client",
+      "enabled": false,
+      "interfaceName": "ppp-fgt0",
+      "mark": 4101,
+      "table": 105,
+      "mtu": 1350,
+      "remoteEndpoint": "fortigate.example.com:443",
+      "localAddresses": [],
+      "dns": ["10.10.0.1"],
+      "credentials": {
+        "username": "vpn-user",
+        "passwordFile": "/etc/las/openfortivpn/fortigate-branch.pass"
+      },
+      "options": {
+        "trustedCert": "",
+        "realm": "",
+        "setDNS": "0"
+      }
     }
   ],
   "routing": {
@@ -307,7 +379,24 @@
     "dhcpServer": {
       "enabled": true,
       "engine": "dnsmasq",
-      "listen": ["enp2s0"]
+      "listen": ["enp2s0"],
+      "authoritative": true,
+      "leaseFile": "/var/lib/misc/dnsmasq.las.leases",
+      "staticLeases": [
+        {
+          "hostname": "nas",
+          "mac": "02:00:00:00:00:10",
+          "ip": "192.168.88.10",
+          "lease": "infinite"
+        }
+      ],
+      "options": [
+        {
+          "tag": "",
+          "code": "option:router",
+          "value": "192.168.88.1"
+        }
+      ]
     },
     "dhcpClient": {
       "enabled": true,
@@ -317,22 +406,112 @@
       "enabled": true,
       "engine": "dnsmasq",
       "listen": ["enp2s0"],
+      "listenAddresses": ["192.168.88.1"],
       "forwarders": ["1.1.1.1", "9.9.9.9"],
-      "localDomains": ["lan"]
+      "localDomains": ["lan"],
+      "conditionalForwarders": [
+        {
+          "domain": "corp.example.com",
+          "upstreams": ["10.60.0.1"]
+        }
+      ],
+      "records": [
+        {
+          "name": "router.lan",
+          "type": "A",
+          "value": "192.168.88.1",
+          "ttl": 300
+        }
+      ],
+      "addressOverrides": [
+        {
+          "domain": "blocked.example",
+          "address": "0.0.0.0"
+        }
+      ],
+      "cacheSize": 10000,
+      "bindInterfaces": true,
+      "dnssec": false,
+      "rebindProtection": true,
+      "strictOrder": false
     },
     "dnsClient": {
       "enabled": true,
       "resolvers": ["1.1.1.1", "9.9.9.9"],
-      "search": ["lan"]
+      "fallbackResolvers": ["8.8.8.8"],
+      "search": ["lan"],
+      "useSystemdResolved": true,
+      "writeResolvConf": false,
+      "dnsOverTLS": false,
+      "dnssec": "allow-downgrade"
     },
     "ntpServer": {
       "enabled": true,
       "engine": "chrony",
-      "listen": ["enp2s0"]
+      "listen": ["enp2s0"],
+      "allowCidrs": ["192.168.88.0/24"],
+      "localStratum": 10,
+      "nts": {
+        "enabled": false,
+        "certFile": "/etc/letsencrypt/live/router.example.com/fullchain.pem",
+        "keyFile": "/etc/letsencrypt/live/router.example.com/privkey.pem"
+      }
     },
     "ntpClient": {
       "enabled": true,
-      "servers": ["pool.ntp.org"]
+      "servers": [],
+      "pools": ["pool.ntp.org"],
+      "peers": [],
+      "fallbackServers": ["time.cloudflare.com"],
+      "nts": false,
+      "makestep": true
+    },
+    "certificateStore": {
+      "enabled": false,
+      "directory": "/etc/las/certs",
+      "trustStore": "/usr/local/share/ca-certificates",
+      "authorities": [
+        {
+          "id": "corp-root",
+          "name": "Corporate Root CA",
+          "sourceFile": "/etc/las/certs/corp-root.crt",
+          "pem": "",
+          "install": true
+        }
+      ],
+      "certificates": [
+        {
+          "id": "router-ui",
+          "domains": ["router.example.com"],
+          "certFile": "/etc/letsencrypt/live/router.example.com/cert.pem",
+          "keyFile": "/etc/letsencrypt/live/router.example.com/privkey.pem",
+          "chainFile": "/etc/letsencrypt/live/router.example.com/chain.pem",
+          "fullChainFile": "/etc/letsencrypt/live/router.example.com/fullchain.pem",
+          "ownerService": "lasd.service",
+          "renewHook": "systemctl try-reload-or-restart lasd || true"
+        }
+      ],
+      "letsEncrypt": {
+        "enabled": false,
+        "engine": "certbot",
+        "email": "admin@example.com",
+        "directoryUrl": "",
+        "staging": true,
+        "webroot": "/var/www/letsencrypt",
+        "renewTimer": true,
+        "certificates": [
+          {
+            "id": "router.example.com",
+            "domains": ["router.example.com"],
+            "method": "webroot",
+            "webroot": "/var/www/letsencrypt",
+            "dnsProvider": "",
+            "keyType": "ecdsa",
+            "deployHook": "systemctl try-reload-or-restart lasd || true",
+            "staging": true
+          }
+        ]
+      }
     },
     "mpls": {
       "enabled": false,

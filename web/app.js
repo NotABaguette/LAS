@@ -157,7 +157,7 @@ function renderTunnels() {
     item.append(formGrid([
       textField("ID", tunnel.id, (value) => tunnel.id = value),
       textField("Name", tunnel.name, (value) => tunnel.name = value),
-      selectField("Type", tunnel.type, ["tun", "wireguard", "openvpn", "ipsec", "ipsec-vti", "vti", "l2tp", "l2tp-ipsec", "pptp", "sstp", "pppoe", "gre", "gretap", "eoip", "ipip", "sit", "6to4", "ip6gre", "ip6tnl", "erspan", "vxlan", "l2tpv3", "vless", "vmess", "vless-xhttp", "xhttp", "xray", "sing-box", "tailscale", "zerotier", "custom"], (value) => tunnel.type = value),
+      selectField("Type", tunnel.type, ["tun", "wireguard", "openvpn", "openconnect", "anyconnect", "globalprotect", "pulse-secure", "fortigate-ssl", "fortinet-ssl", "ipsec", "ipsec-vti", "vti", "l2tp", "l2tp-ipsec", "pptp", "sstp", "pppoe", "gre", "gretap", "eoip", "ipip", "sit", "6to4", "ip6gre", "ip6tnl", "erspan", "vxlan", "l2tpv3", "vless", "vmess", "vless-xhttp", "xhttp", "xray", "sing-box", "tailscale", "zerotier", "custom"], (value) => tunnel.type = value),
       selectField("Direction", tunnel.direction, ["client", "server", "peer"], (value) => tunnel.direction = value),
       checkboxField("Enabled", tunnel.enabled, (value) => tunnel.enabled = value),
       textField("Interface", tunnel.interfaceName, (value) => tunnel.interfaceName = value),
@@ -336,12 +336,29 @@ function renderRules() {
 
 function renderServices() {
   const services = state.config.services || (state.config.services = {});
-  services.dhcpServer = services.dhcpServer || { enabled: false, engine: "dnsmasq", listen: [] };
+  services.dhcpServer = services.dhcpServer || { enabled: false, engine: "dnsmasq", listen: [], authoritative: false, leaseFile: "", staticLeases: [], options: [] };
+  services.dhcpServer.staticLeases = services.dhcpServer.staticLeases || [];
+  services.dhcpServer.options = services.dhcpServer.options || [];
   services.dhcpClient = services.dhcpClient || { enabled: true, interfaces: [] };
-  services.dnsServer = services.dnsServer || { enabled: false, engine: "dnsmasq", listen: [], forwarders: [], localDomains: [] };
-  services.dnsClient = services.dnsClient || { enabled: true, resolvers: [], search: [] };
-  services.ntpServer = services.ntpServer || { enabled: false, engine: "chrony", listen: [] };
-  services.ntpClient = services.ntpClient || { enabled: true, servers: [] };
+  services.dnsServer = services.dnsServer || { enabled: false, engine: "dnsmasq", listen: [], listenAddresses: [], forwarders: [], localDomains: [], conditionalForwarders: [], records: [], addressOverrides: [], cacheSize: 0, bindInterfaces: false, dnssec: false, rebindProtection: true, strictOrder: false };
+  services.dnsServer.listenAddresses = services.dnsServer.listenAddresses || [];
+  services.dnsServer.conditionalForwarders = services.dnsServer.conditionalForwarders || [];
+  services.dnsServer.records = services.dnsServer.records || [];
+  services.dnsServer.addressOverrides = services.dnsServer.addressOverrides || [];
+  services.dnsClient = services.dnsClient || { enabled: true, resolvers: [], fallbackResolvers: [], search: [], useSystemdResolved: true, writeResolvConf: false, dnsOverTLS: false, dnssec: "" };
+  services.dnsClient.fallbackResolvers = services.dnsClient.fallbackResolvers || [];
+  services.ntpServer = services.ntpServer || { enabled: false, engine: "chrony", listen: [], allowCidrs: [], localStratum: 10, nts: { enabled: false, certFile: "", keyFile: "" } };
+  services.ntpServer.allowCidrs = services.ntpServer.allowCidrs || [];
+  services.ntpServer.nts = services.ntpServer.nts || { enabled: false, certFile: "", keyFile: "" };
+  services.ntpClient = services.ntpClient || { enabled: true, servers: [], pools: [], peers: [], fallbackServers: [], nts: false, makestep: true };
+  services.ntpClient.pools = services.ntpClient.pools || [];
+  services.ntpClient.peers = services.ntpClient.peers || [];
+  services.ntpClient.fallbackServers = services.ntpClient.fallbackServers || [];
+  services.certificateStore = services.certificateStore || { enabled: false, directory: "/etc/las/certs", trustStore: "/usr/local/share/ca-certificates", authorities: [], certificates: [], letsEncrypt: { enabled: false, engine: "certbot", email: "", directoryUrl: "", staging: false, webroot: "/var/www/letsencrypt", renewTimer: true, certificates: [] } };
+  services.certificateStore.authorities = services.certificateStore.authorities || [];
+  services.certificateStore.certificates = services.certificateStore.certificates || [];
+  services.certificateStore.letsEncrypt = services.certificateStore.letsEncrypt || { enabled: false, engine: "certbot", email: "", directoryUrl: "", staging: false, webroot: "/var/www/letsencrypt", renewTimer: true, certificates: [] };
+  services.certificateStore.letsEncrypt.certificates = services.certificateStore.letsEncrypt.certificates || [];
   services.mpls = services.mpls || { enabled: false, interfaces: [], ldp: false, vrf: "" };
 
   const root = el("div", "grid");
@@ -350,8 +367,12 @@ function renderServices() {
     checkboxField("DHCP server enabled", services.dhcpServer.enabled, (value) => services.dhcpServer.enabled = value),
     selectField("DHCP server engine", services.dhcpServer.engine, ["dnsmasq", "kea"], (value) => services.dhcpServer.engine = value),
     listField("DHCP server listen links", services.dhcpServer.listen, (value) => services.dhcpServer.listen = value),
+    checkboxField("Authoritative DHCP", services.dhcpServer.authoritative, (value) => services.dhcpServer.authoritative = value),
+    textField("Lease file", services.dhcpServer.leaseFile, (value) => services.dhcpServer.leaseFile = value),
     checkboxField("DHCP client enabled", services.dhcpClient.enabled, (value) => services.dhcpClient.enabled = value),
     listField("DHCP client interfaces", services.dhcpClient.interfaces, (value) => services.dhcpClient.interfaces = value),
+    jsonField("Static leases", services.dhcpServer.staticLeases, (value) => services.dhcpServer.staticLeases = value, "JSON array: hostname, mac, ip, lease."),
+    jsonField("DHCP options", services.dhcpServer.options, (value) => services.dhcpServer.options = value, "JSON array: tag, code, value."),
   ]));
   root.append(dhcp);
 
@@ -360,11 +381,25 @@ function renderServices() {
     checkboxField("DNS server enabled", services.dnsServer.enabled, (value) => services.dnsServer.enabled = value),
     selectField("DNS server engine", services.dnsServer.engine, ["dnsmasq", "unbound", "bind"], (value) => services.dnsServer.engine = value),
     listField("DNS listen links", services.dnsServer.listen, (value) => services.dnsServer.listen = value),
+    listField("DNS listen addresses", services.dnsServer.listenAddresses, (value) => services.dnsServer.listenAddresses = value),
     listField("DNS forwarders", services.dnsServer.forwarders, (value) => services.dnsServer.forwarders = value),
     listField("Local domains", services.dnsServer.localDomains, (value) => services.dnsServer.localDomains = value),
+    numberField("Cache size", services.dnsServer.cacheSize, (value) => services.dnsServer.cacheSize = value),
+    checkboxField("Bind interfaces", services.dnsServer.bindInterfaces, (value) => services.dnsServer.bindInterfaces = value),
+    checkboxField("DNSSEC server validation", services.dnsServer.dnssec, (value) => services.dnsServer.dnssec = value),
+    checkboxField("Rebind protection", services.dnsServer.rebindProtection, (value) => services.dnsServer.rebindProtection = value),
+    checkboxField("Strict upstream order", services.dnsServer.strictOrder, (value) => services.dnsServer.strictOrder = value),
+    jsonField("Conditional forwarders", services.dnsServer.conditionalForwarders, (value) => services.dnsServer.conditionalForwarders = value, "JSON array: domain, upstreams."),
+    jsonField("DNS records", services.dnsServer.records, (value) => services.dnsServer.records = value, "JSON array: name, type, value, ttl."),
+    jsonField("Address overrides", services.dnsServer.addressOverrides, (value) => services.dnsServer.addressOverrides = value, "JSON array: domain, address."),
     checkboxField("DNS client enabled", services.dnsClient.enabled, (value) => services.dnsClient.enabled = value),
     listField("Client resolvers", services.dnsClient.resolvers, (value) => services.dnsClient.resolvers = value),
+    listField("Fallback resolvers", services.dnsClient.fallbackResolvers, (value) => services.dnsClient.fallbackResolvers = value),
     listField("Search domains", services.dnsClient.search, (value) => services.dnsClient.search = value),
+    checkboxField("Use systemd-resolved", services.dnsClient.useSystemdResolved, (value) => services.dnsClient.useSystemdResolved = value),
+    checkboxField("Write /etc/resolv.conf", services.dnsClient.writeResolvConf, (value) => services.dnsClient.writeResolvConf = value),
+    checkboxField("DNS-over-TLS", services.dnsClient.dnsOverTLS, (value) => services.dnsClient.dnsOverTLS = value),
+    selectField("DNSSEC client", services.dnsClient.dnssec, ["", "no", "allow-downgrade", "yes"], (value) => services.dnsClient.dnssec = value),
   ]));
   root.append(dns);
 
@@ -373,10 +408,38 @@ function renderServices() {
     checkboxField("NTP server enabled", services.ntpServer.enabled, (value) => services.ntpServer.enabled = value),
     selectField("NTP engine", services.ntpServer.engine, ["chrony", "ntpd"], (value) => services.ntpServer.engine = value),
     listField("NTP server listen links", services.ntpServer.listen, (value) => services.ntpServer.listen = value),
+    listField("NTP allow CIDRs", services.ntpServer.allowCidrs, (value) => services.ntpServer.allowCidrs = value),
+    numberField("Local stratum", services.ntpServer.localStratum, (value) => services.ntpServer.localStratum = value),
+    checkboxField("NTS server", services.ntpServer.nts.enabled, (value) => services.ntpServer.nts.enabled = value),
+    textField("NTS cert file", services.ntpServer.nts.certFile, (value) => services.ntpServer.nts.certFile = value),
+    textField("NTS key file", services.ntpServer.nts.keyFile, (value) => services.ntpServer.nts.keyFile = value),
     checkboxField("NTP client enabled", services.ntpClient.enabled, (value) => services.ntpClient.enabled = value),
     listField("NTP upstream servers", services.ntpClient.servers, (value) => services.ntpClient.servers = value),
+    listField("NTP pools", services.ntpClient.pools, (value) => services.ntpClient.pools = value),
+    listField("NTP peers", services.ntpClient.peers, (value) => services.ntpClient.peers = value),
+    listField("NTP fallback servers", services.ntpClient.fallbackServers, (value) => services.ntpClient.fallbackServers = value),
+    checkboxField("NTS client", services.ntpClient.nts, (value) => services.ntpClient.nts = value),
+    checkboxField("Makestep", services.ntpClient.makestep, (value) => services.ntpClient.makestep = value),
   ]));
   root.append(ntp);
+
+  const certs = card("SSL Certificate Store / Let's Encrypt", "full");
+  certs.append(formGrid([
+    checkboxField("Certificate store enabled", services.certificateStore.enabled, (value) => services.certificateStore.enabled = value),
+    textField("Certificate directory", services.certificateStore.directory, (value) => services.certificateStore.directory = value),
+    textField("Trust store", services.certificateStore.trustStore, (value) => services.certificateStore.trustStore = value),
+    checkboxField("Let's Encrypt enabled", services.certificateStore.letsEncrypt.enabled, (value) => services.certificateStore.letsEncrypt.enabled = value),
+    selectField("ACME engine", services.certificateStore.letsEncrypt.engine, ["certbot"], (value) => services.certificateStore.letsEncrypt.engine = value),
+    textField("ACME email", services.certificateStore.letsEncrypt.email, (value) => services.certificateStore.letsEncrypt.email = value),
+    textField("ACME directory URL", services.certificateStore.letsEncrypt.directoryUrl, (value) => services.certificateStore.letsEncrypt.directoryUrl = value),
+    textField("ACME webroot", services.certificateStore.letsEncrypt.webroot, (value) => services.certificateStore.letsEncrypt.webroot = value),
+    checkboxField("ACME staging", services.certificateStore.letsEncrypt.staging, (value) => services.certificateStore.letsEncrypt.staging = value),
+    checkboxField("ACME renew timer", services.certificateStore.letsEncrypt.renewTimer, (value) => services.certificateStore.letsEncrypt.renewTimer = value),
+    jsonField("Trusted authorities", services.certificateStore.authorities, (value) => services.certificateStore.authorities = value, "JSON array: id, name, sourceFile/pem, install."),
+    jsonField("Managed certificates", services.certificateStore.certificates, (value) => services.certificateStore.certificates = value, "JSON array: id, domains, cert/key/chain files, ownerService, renewHook."),
+    jsonField("Let's Encrypt certs", services.certificateStore.letsEncrypt.certificates, (value) => services.certificateStore.letsEncrypt.certificates = value, "JSON array: id, domains, method, webroot, dnsProvider, keyType, deployHook."),
+  ]));
+  root.append(certs);
 
   const mpls = card("MPLS", "full");
   mpls.append(formGrid([
@@ -703,6 +766,30 @@ function kvField(labelText, value, onChange) {
   const textarea = el("textarea");
   textarea.value = Object.entries(value || {}).map(([key, val]) => `${key}=${val}`).join("\n");
   textarea.addEventListener("input", (event) => onChange(parseKV(event.target.value)));
+  wrap.append(textarea);
+  return wrap;
+}
+
+function jsonField(labelText, value, onChange, hint = "JSON value.") {
+  const wrap = fieldWrap(labelText, hint);
+  wrap.classList.add("full");
+  const textarea = el("textarea");
+  textarea.value = JSON.stringify(value ?? [], null, 2);
+  textarea.addEventListener("input", (event) => {
+    try {
+      onChange(JSON.parse(event.target.value || "[]"));
+      textarea.classList.remove("invalid");
+    } catch {
+      textarea.classList.add("invalid");
+    }
+  });
+  textarea.addEventListener("blur", (event) => {
+    try {
+      event.target.value = JSON.stringify(JSON.parse(event.target.value || "[]"), null, 2);
+    } catch (error) {
+      message(error.message, true);
+    }
+  });
   wrap.append(textarea);
   return wrap;
 }

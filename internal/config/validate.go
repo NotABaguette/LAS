@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"regexp"
 	"slices"
+	"strings"
 )
 
 var identifierRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
@@ -15,6 +16,7 @@ var tunnelTypes = []string{
 	"tun", "wireguard", "openvpn", "ipsec", "ipsec-vti", "vti",
 	"l2tp", "l2tp-ipsec", "pptp", "sstp", "pppoe",
 	"gre", "gretap", "eoip", "ipip", "sit", "6to4", "ip6gre", "ip6tnl", "erspan", "vxlan", "l2tpv3",
+	"openconnect", "anyconnect", "globalprotect", "pulse-secure", "fortigate-ssl", "fortinet-ssl",
 	"vless", "vmess", "vless-xhttp", "xhttp", "sing-box", "xray",
 	"tailscale", "zerotier", "custom",
 }
@@ -24,6 +26,11 @@ var wanGroupModes = []string{"weighted-ecmp", "failover", "active-backup"}
 var bondModes = []string{"balance-rr", "active-backup", "balance-xor", "broadcast", "802.3ad", "balance-tlb", "balance-alb"}
 var actionTypes = []string{"direct", "interface", "tunnel", "wan-group", "load-balance", "blackhole", "reject", "scan", "mirror"}
 var protocols = []string{"tcp", "udp", "icmp", "icmpv6", "gre", "esp", "ah"}
+var dnsServerEngines = []string{"", "dnsmasq", "unbound", "bind"}
+var dhcpServerEngines = []string{"", "dnsmasq", "kea"}
+var ntpEngines = []string{"", "chrony", "ntpd"}
+var acmeEngines = []string{"", "certbot"}
+var recordTypes = []string{"", "A", "AAAA", "CNAME", "TXT", "MX", "SRV", "PTR"}
 
 func (c Config) Validate() error {
 	if c.Version != CurrentVersion {
@@ -254,9 +261,29 @@ func validateTunnel(tunnel Tunnel) error {
 }
 
 func validateServices(services ServicesConfig, knownLinks map[string]struct{}) error {
+	if !slices.Contains(dhcpServerEngines, services.DHCPServer.Engine) {
+		return fmt.Errorf("dhcp server has unsupported engine %q", services.DHCPServer.Engine)
+	}
+	if !slices.Contains(dnsServerEngines, services.DNSServer.Engine) {
+		return fmt.Errorf("dns server has unsupported engine %q", services.DNSServer.Engine)
+	}
+	if !slices.Contains(ntpEngines, services.NTPServer.Engine) {
+		return fmt.Errorf("ntp server has unsupported engine %q", services.NTPServer.Engine)
+	}
 	for _, iface := range services.DHCPServer.Listen {
 		if _, exists := knownLinks[iface]; !exists {
 			return fmt.Errorf("dhcp server references unknown link %q", iface)
+		}
+	}
+	for _, lease := range services.DHCPServer.StaticLeases {
+		if lease.Hostname != "" && !validHostname(lease.Hostname) {
+			return fmt.Errorf("dhcp static lease hostname %q is invalid", lease.Hostname)
+		}
+		if lease.MAC == "" {
+			return fmt.Errorf("dhcp static lease for %s requires mac", lease.Hostname)
+		}
+		if lease.IP != "" && net.ParseIP(lease.IP) == nil {
+			return fmt.Errorf("dhcp static lease %s ip %q is invalid", lease.Hostname, lease.IP)
 		}
 	}
 	for _, iface := range services.DHCPClient.Interfaces {
@@ -269,9 +296,47 @@ func validateServices(services ServicesConfig, knownLinks map[string]struct{}) e
 			return fmt.Errorf("dns server references unknown link %q", iface)
 		}
 	}
-	for _, resolver := range append(services.DNSServer.Forwarders, services.DNSClient.Resolvers...) {
-		if net.ParseIP(resolver) == nil {
-			return fmt.Errorf("dns resolver %q is not an IP address", resolver)
+	for _, address := range services.DNSServer.ListenAddresses {
+		if net.ParseIP(address) == nil {
+			return fmt.Errorf("dns listen address %q is not an IP address", address)
+		}
+	}
+	for _, resolver := range append(append([]string{}, services.DNSServer.Forwarders...), append(services.DNSClient.Resolvers, services.DNSClient.FallbackResolvers...)...) {
+		if err := validateResolver(resolver); err != nil {
+			return fmt.Errorf("dns resolver %q: %w", resolver, err)
+		}
+	}
+	for _, zone := range services.DNSServer.ConditionalForwarders {
+		if !validDomainName(zone.Domain) {
+			return fmt.Errorf("dns conditional forwarder domain %q is invalid", zone.Domain)
+		}
+		for _, resolver := range zone.Upstreams {
+			if err := validateResolver(resolver); err != nil {
+				return fmt.Errorf("dns conditional forwarder %s resolver %q: %w", zone.Domain, resolver, err)
+			}
+		}
+	}
+	for _, record := range services.DNSServer.Records {
+		if !validDomainName(record.Name) {
+			return fmt.Errorf("dns record name %q is invalid", record.Name)
+		}
+		recordType := strings.ToUpper(record.Type)
+		if !slices.Contains(recordTypes, recordType) {
+			return fmt.Errorf("dns record %s has unsupported type %q", record.Name, record.Type)
+		}
+		if record.Value == "" {
+			return fmt.Errorf("dns record %s requires value", record.Name)
+		}
+		if record.TTL < 0 {
+			return fmt.Errorf("dns record %s ttl must be non-negative", record.Name)
+		}
+	}
+	for _, override := range services.DNSServer.AddressOverrides {
+		if !validDomainName(override.Domain) {
+			return fmt.Errorf("dns override domain %q is invalid", override.Domain)
+		}
+		if net.ParseIP(override.Address) == nil {
+			return fmt.Errorf("dns override %s address %q is invalid", override.Domain, override.Address)
 		}
 	}
 	for _, iface := range services.NTPServer.Listen {
@@ -279,12 +344,20 @@ func validateServices(services ServicesConfig, knownLinks map[string]struct{}) e
 			return fmt.Errorf("ntp server references unknown link %q", iface)
 		}
 	}
+	for _, cidr := range services.NTPServer.AllowCIDRs {
+		if err := validateCIDR(cidr); err != nil {
+			return fmt.Errorf("ntp allow cidr %q: %w", cidr, err)
+		}
+	}
+	if services.NTPServer.LocalStratum < 0 || services.NTPServer.LocalStratum > 15 {
+		return fmt.Errorf("ntp localStratum must be 0-15")
+	}
 	for _, iface := range services.MPLS.Interfaces {
 		if _, exists := knownLinks[iface]; !exists {
 			return fmt.Errorf("mpls references unknown link %q", iface)
 		}
 	}
-	return nil
+	return validateCertificateStore(services.CertificateStore)
 }
 
 func validateStaticRoute(route StaticRoute, knownLinks map[string]struct{}) error {
@@ -644,6 +717,57 @@ func validateOneToOneNAT(nat OneToOneNAT, knownLinks map[string]struct{}) error 
 	return nil
 }
 
+func validateCertificateStore(store CertificateStore) error {
+	if store.LetsEncrypt.Engine != "" && !slices.Contains(acmeEngines, store.LetsEncrypt.Engine) {
+		return fmt.Errorf("letsencrypt has unsupported engine %q", store.LetsEncrypt.Engine)
+	}
+	ids := map[string]struct{}{}
+	for _, authority := range store.Authorities {
+		if !identifierRE.MatchString(authority.ID) {
+			return fmt.Errorf("invalid certificate authority id %q", authority.ID)
+		}
+		if authority.SourceFile == "" && authority.PEM == "" {
+			return fmt.Errorf("certificate authority %s requires sourceFile or pem", authority.ID)
+		}
+	}
+	for _, cert := range store.Certificates {
+		if !identifierRE.MatchString(cert.ID) {
+			return fmt.Errorf("invalid certificate id %q", cert.ID)
+		}
+		if _, exists := ids[cert.ID]; exists {
+			return fmt.Errorf("duplicate certificate id %q", cert.ID)
+		}
+		ids[cert.ID] = struct{}{}
+		for _, domain := range cert.Domains {
+			if !validDomainName(domain) {
+				return fmt.Errorf("certificate %s domain %q is invalid", cert.ID, domain)
+			}
+		}
+	}
+	for _, cert := range store.LetsEncrypt.Certificates {
+		if !identifierRE.MatchString(cert.ID) {
+			return fmt.Errorf("invalid letsencrypt certificate id %q", cert.ID)
+		}
+		if len(cert.Domains) == 0 {
+			return fmt.Errorf("letsencrypt certificate %s requires at least one domain", cert.ID)
+		}
+		for _, domain := range cert.Domains {
+			if !validDomainName(domain) {
+				return fmt.Errorf("letsencrypt certificate %s domain %q is invalid", cert.ID, domain)
+			}
+		}
+		switch cert.Method {
+		case "", "webroot", "standalone", "dns":
+		default:
+			return fmt.Errorf("letsencrypt certificate %s has unsupported method %q", cert.ID, cert.Method)
+		}
+	}
+	if store.LetsEncrypt.Enabled && store.LetsEncrypt.Email == "" {
+		return fmt.Errorf("letsencrypt email is required when ACME is enabled")
+	}
+	return nil
+}
+
 func validateCIDR(value string) error {
 	if value == "" {
 		return fmt.Errorf("empty CIDR")
@@ -652,4 +776,53 @@ func validateCIDR(value string) error {
 		return err
 	}
 	return nil
+}
+
+func validateResolver(value string) error {
+	if value == "" {
+		return fmt.Errorf("empty resolver")
+	}
+	host := strings.TrimPrefix(value, "tls://")
+	if strings.Contains(host, "#") {
+		host = strings.SplitN(host, "#", 2)[0]
+	}
+	if strings.Contains(host, ":") {
+		if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+			host = strings.Trim(parsedHost, "[]")
+		}
+	}
+	host = strings.Trim(host, "[]")
+	if net.ParseIP(host) != nil || validDomainName(host) {
+		return nil
+	}
+	return fmt.Errorf("expected IP address or DNS hostname")
+}
+
+func validHostname(value string) bool {
+	return validDomainName(value)
+}
+
+func validDomainName(value string) bool {
+	if value == "" || len(value) > 253 {
+		return false
+	}
+	trimmed := strings.TrimSuffix(value, ".")
+	if trimmed == "" {
+		return false
+	}
+	for _, label := range strings.Split(trimmed, ".") {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '*' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }

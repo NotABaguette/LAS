@@ -18,6 +18,7 @@ func BuildPlan(cfg config.Config) (control.Plan, error) {
 	var plan control.Plan
 	addHostPlan(&plan, cfg)
 	addInterfacePlan(&plan, cfg.Interfaces)
+	addCertificateStorePlan(&plan, cfg.Services.CertificateStore)
 	addTunnelPlan(&plan, cfg.Tunnels)
 	addRoutingPlan(&plan, cfg)
 	addServicesPlan(&plan, cfg)
@@ -67,8 +68,98 @@ func addInterfacePlan(plan *control.Plan, interfaces []config.Interface) {
 		if iface.Gateway != "" {
 			plan.AddCommand("set default route via "+iface.Name, "ip", "route", "replace", "default", "via", iface.Gateway, "dev", iface.Name)
 		}
-		if iface.DHCPServer != nil {
-			plan.AddWarning("DHCP server for %s is modeled but requires dnsmasq/kea template activation in a future renderer", iface.Name)
+	}
+}
+
+func addCertificateStorePlan(plan *control.Plan, store config.CertificateStore) {
+	if !store.Enabled && !store.LetsEncrypt.Enabled {
+		return
+	}
+	dir := store.Directory
+	if dir == "" {
+		dir = "/etc/las/certs"
+	}
+	trustStore := store.TrustStore
+	if trustStore == "" {
+		trustStore = "/usr/local/share/ca-certificates"
+	}
+	plan.AddCommand("ensure LAS certificate store", "install", "-d", "-m", "0750", dir)
+	if len(store.Authorities) > 0 {
+		plan.AddCommand("ensure system trust store", "install", "-d", "-m", "0755", trustStore)
+	}
+	installedCA := false
+	for _, authority := range store.Authorities {
+		target := dir + "/authorities/" + authority.ID + ".crt"
+		if authority.Install {
+			target = trustStore + "/las-" + authority.ID + ".crt"
+			installedCA = true
+		}
+		plan.AddCommand("ensure CA directory "+authority.ID, "install", "-d", "-m", "0750", filepathDir(target))
+		if authority.PEM != "" {
+			plan.AddWrite("render trusted CA "+authority.ID, target, "0644", authority.PEM)
+		} else {
+			plan.AddCommand("install trusted CA "+authority.ID, "install", "-m", "0644", authority.SourceFile, target)
+		}
+	}
+	if installedCA {
+		plan.AddCommand("refresh Debian CA certificates", "update-ca-certificates")
+	}
+	for _, cert := range store.Certificates {
+		plan.AddWrite("render managed certificate metadata "+cert.ID, dir+"/"+cert.ID+".json", "0600", renderManagedCertificateMetadata(cert))
+		if cert.CertFile == "" || cert.KeyFile == "" {
+			plan.AddWarning("managed certificate %s is missing certFile or keyFile", cert.ID)
+		}
+	}
+	if store.LetsEncrypt.Enabled {
+		acme := store.LetsEncrypt
+		webroot := acme.Webroot
+		if webroot == "" {
+			webroot = "/var/www/letsencrypt"
+		}
+		plan.AddCommand("ensure Let's Encrypt webroot", "install", "-d", "-m", "0755", webroot)
+		plan.AddCommand("ensure certbot deploy hook directory", "install", "-d", "-m", "0755", "/etc/letsencrypt/renewal-hooks/deploy")
+		plan.AddWrite("render LAS certbot deploy hook", "/etc/letsencrypt/renewal-hooks/deploy/las.sh", "0755", renderCertbotDeployHook(store))
+		for _, cert := range acme.Certificates {
+			args := []string{"certonly", "--non-interactive", "--agree-tos", "--email", acme.Email, "--cert-name", cert.ID}
+			for _, domain := range cert.Domains {
+				args = append(args, "-d", domain)
+			}
+			method := cert.Method
+			if method == "" {
+				method = "webroot"
+			}
+			switch method {
+			case "webroot":
+				certWebroot := cert.Webroot
+				if certWebroot == "" {
+					certWebroot = webroot
+				}
+				args = append(args, "--webroot", "-w", certWebroot)
+			case "standalone":
+				args = append(args, "--standalone")
+			case "dns":
+				args = append(args, "--preferred-challenges", "dns")
+				if cert.DNSProvider != "" {
+					args = append(args, "--authenticator", "dns-"+cert.DNSProvider)
+				}
+				plan.AddWarning("Let's Encrypt certificate %s uses DNS challenge; install and configure the matching certbot DNS plugin/credentials", cert.ID)
+			}
+			if acme.DirectoryURL != "" {
+				args = append(args, "--server", acme.DirectoryURL)
+			}
+			if acme.Staging || cert.Staging {
+				args = append(args, "--staging")
+			}
+			if cert.KeyType != "" {
+				args = append(args, "--key-type", cert.KeyType)
+			}
+			if cert.DeployHook != "" {
+				args = append(args, "--deploy-hook", cert.DeployHook)
+			}
+			plan.AddCommand("request/renew Let's Encrypt certificate "+cert.ID, "certbot", args...)
+		}
+		if acme.RenewTimer {
+			plan.AddCommand("enable certbot auto-renewal", "systemctl", "enable", "--now", "certbot.timer")
 		}
 	}
 }
@@ -83,6 +174,7 @@ func addTunnelPlan(plan *control.Plan, tunnels []config.Tunnel) {
 			continue
 		}
 
+		serviceManagedDevice := false
 		switch tunnel.Type {
 		case "tun":
 			plan.AddCommand("ensure TUN device "+tunnel.InterfaceName, "sh", "-c", fmt.Sprintf("ip link show dev %s >/dev/null 2>&1 || ip tuntap add dev %s mode tun", tunnel.InterfaceName, tunnel.InterfaceName))
@@ -105,8 +197,14 @@ func addTunnelPlan(plan *control.Plan, tunnels []config.Tunnel) {
 		case "l2tpv3":
 			plan.AddWarning("L2TPv3 tunnel %s is modeled; full ip l2tp session/pseudowire rendering is TODO", tunnel.ID)
 		case "openvpn":
-			plan.AddWarning("openvpn tunnel %s should be managed by openvpn-client@%s.service and expose %s", tunnel.ID, tunnel.ID, tunnel.InterfaceName)
-			plan.AddCommand("enable OpenVPN client "+tunnel.ID, "systemctl", "enable", "--now", "openvpn-client@"+tunnel.ID)
+			addOpenVPNPlan(plan, tunnel)
+			serviceManagedDevice = true
+		case "openconnect", "anyconnect", "globalprotect", "pulse-secure":
+			addOpenConnectPlan(plan, tunnel, openConnectProtocol(tunnel.Type, tunnel.Options))
+			serviceManagedDevice = true
+		case "fortigate-ssl", "fortinet-ssl":
+			addFortiGateSSLPlan(plan, tunnel)
+			serviceManagedDevice = true
 		case "ipsec", "l2tp", "l2tp-ipsec":
 			plan.AddWarning("IPsec/L2TP tunnel %s requires strongSwan/xl2tpd secrets and peer profile files under /etc; full profile rendering is TODO", tunnel.ID)
 			plan.AddCommand("enable strongSwan", "systemctl", "enable", "--now", "strongswan")
@@ -120,17 +218,10 @@ func addTunnelPlan(plan *control.Plan, tunnels []config.Tunnel) {
 			}
 			plan.AddWarning("%s tunnel %s is PPP-backed; provide peer/secrets files and expose interface %s", tunnel.Type, tunnel.ID, tunnel.InterfaceName)
 			plan.AddCommand("enable PPP tunnel service "+service, "systemctl", "enable", "--now", service)
+			serviceManagedDevice = true
 		case "vless", "vmess", "vless-xhttp", "xhttp", "xray", "sing-box":
-			engine := tunnel.Options["engine"]
-			if engine == "" {
-				engine = defaultProxyEngine(tunnel.Type)
-			}
-			configFile := tunnel.Credentials["configFile"]
-			if configFile == "" {
-				plan.AddWarning("%s tunnel %s has no credentials.configFile", tunnel.Type, tunnel.ID)
-			}
-			plan.AddWarning("%s tunnel %s is service-backed; ensure %s creates interface %s", tunnel.Type, tunnel.ID, engine, tunnel.InterfaceName)
-			plan.AddCommand("enable "+engine+" service", "systemctl", "enable", "--now", engine)
+			addProxyTunnelServicePlan(plan, tunnel)
+			serviceManagedDevice = true
 		case "tailscale", "zerotier":
 			service := tunnel.Type
 			if tunnel.Type == "zerotier" {
@@ -138,26 +229,427 @@ func addTunnelPlan(plan *control.Plan, tunnels []config.Tunnel) {
 			}
 			plan.AddWarning("%s tunnel %s is managed by its own control plane; lasd routes traffic into %s", tunnel.Type, tunnel.ID, tunnel.InterfaceName)
 			plan.AddCommand("enable "+service+" service", "systemctl", "enable", "--now", service)
+			serviceManagedDevice = true
 		case "custom":
 			service := tunnel.Options["service"]
 			if service == "" {
 				plan.AddWarning("custom tunnel %s has no options.service", tunnel.ID)
 			} else {
 				plan.AddCommand("enable custom tunnel service "+service, "systemctl", "enable", "--now", service)
+				serviceManagedDevice = true
 			}
 		}
 
-		if tunnel.MTU > 0 {
+		if serviceManagedDevice {
+			if tunnel.MTU > 0 || len(tunnel.LocalAddresses) > 0 {
+				plan.AddWarning("tunnel %s is service-managed; MTU and local addresses are rendered into the backend config where supported", tunnel.ID)
+			}
+		} else if tunnel.MTU > 0 {
 			plan.AddCommand("set mtu for "+tunnel.InterfaceName, "ip", "link", "set", "dev", tunnel.InterfaceName, "mtu", strconv.Itoa(tunnel.MTU))
 		}
-		plan.AddCommand("bring up tunnel "+tunnel.InterfaceName, "ip", "link", "set", "dev", tunnel.InterfaceName, "up")
-		for _, address := range tunnel.LocalAddresses {
-			plan.AddCommand("assign "+address+" to "+tunnel.InterfaceName, "ip", "address", "replace", address, "dev", tunnel.InterfaceName)
+		if !serviceManagedDevice {
+			plan.AddCommand("bring up tunnel "+tunnel.InterfaceName, "ip", "link", "set", "dev", tunnel.InterfaceName, "up")
+			for _, address := range tunnel.LocalAddresses {
+				plan.AddCommand("assign "+address+" to "+tunnel.InterfaceName, "ip", "address", "replace", address, "dev", tunnel.InterfaceName)
+			}
 		}
 		if tunnel.Table > 0 {
 			plan.AddCommand("route tunnel table "+strconv.Itoa(tunnel.Table), "ip", "route", "replace", "default", "dev", tunnel.InterfaceName, "table", strconv.Itoa(tunnel.Table))
 		}
 	}
+}
+
+func addOpenVPNPlan(plan *control.Plan, tunnel config.Tunnel) {
+	profilePath := openVPNProfilePath(tunnel)
+	plan.AddCommand("ensure OpenVPN profile directory", "install", "-d", "-m", "0750", filepathDir(profilePath))
+	if source := tunnel.Credentials["configFile"]; source != "" && source != profilePath {
+		plan.AddCommand("install OpenVPN profile "+tunnel.ID, "install", "-m", "0600", source, profilePath)
+	} else {
+		if authPath := generatedOpenVPNAuthPath(tunnel); authPath != "" {
+			plan.AddCommand("ensure OpenVPN LAS secret directory", "install", "-d", "-m", "0750", filepathDir(authPath))
+			plan.AddWrite("render OpenVPN auth file "+tunnel.ID, authPath, "0600", tunnel.Credentials["username"]+"\n"+tunnel.Credentials["password"]+"\n")
+			plan.AddWarning("OpenVPN tunnel %s contains inline username/password; prefer credentials.authFile to avoid secrets in apply plans", tunnel.ID)
+		}
+		plan.AddWrite("render OpenVPN profile "+tunnel.ID, profilePath, "0600", renderOpenVPNConfig(tunnel))
+	}
+	service := "openvpn-client@" + tunnel.ID
+	if tunnel.Direction == "server" {
+		service = "openvpn-server@" + tunnel.ID
+	}
+	plan.AddCommand("enable OpenVPN tunnel "+tunnel.ID, "systemctl", "enable", "--now", service)
+}
+
+func addOpenConnectPlan(plan *control.Plan, tunnel config.Tunnel, protocol string) {
+	envPath := "/etc/las/openconnect/" + tunnel.ID + ".env"
+	serviceName := "las-openconnect-" + tunnel.ID + ".service"
+	plan.AddCommand("ensure OpenConnect profile directory", "install", "-d", "-m", "0750", "/etc/las/openconnect")
+	if tunnel.Credentials["username"] == "" {
+		plan.AddWarning("OpenConnect tunnel %s has no credentials.username; non-interactive service auth may fail", tunnel.ID)
+	}
+	if tunnel.Credentials["passwordFile"] == "" && tunnel.Credentials["cookieFile"] == "" {
+		plan.AddWarning("OpenConnect tunnel %s has no credentials.passwordFile or credentials.cookieFile; configure one for unattended startup", tunnel.ID)
+	}
+	plan.AddWrite("render OpenConnect environment "+tunnel.ID, envPath, "0600", renderOpenConnectEnv(tunnel, protocol))
+	plan.AddWrite("render OpenConnect service "+tunnel.ID, "/etc/systemd/system/"+serviceName, "0644", renderOpenConnectService(envPath))
+	plan.AddCommand("reload systemd for OpenConnect "+tunnel.ID, "systemctl", "daemon-reload")
+	plan.AddCommand("enable OpenConnect tunnel "+tunnel.ID, "systemctl", "enable", "--now", serviceName)
+}
+
+func addFortiGateSSLPlan(plan *control.Plan, tunnel config.Tunnel) {
+	confPath := "/etc/las/openfortivpn/" + tunnel.ID + ".conf"
+	serviceName := "las-openfortivpn-" + tunnel.ID + ".service"
+	plan.AddCommand("ensure FortiGate SSL VPN profile directory", "install", "-d", "-m", "0750", "/etc/las/openfortivpn")
+	if tunnel.Credentials["username"] == "" {
+		plan.AddWarning("FortiGate SSL VPN tunnel %s has no credentials.username; non-interactive service auth may fail", tunnel.ID)
+	}
+	if tunnel.Credentials["password"] == "" && tunnel.Credentials["passwordFile"] == "" {
+		plan.AddWarning("FortiGate SSL VPN tunnel %s has no credentials.password or credentials.passwordFile; configure one for unattended startup", tunnel.ID)
+	}
+	if tunnel.Credentials["password"] != "" {
+		plan.AddWarning("FortiGate SSL VPN tunnel %s contains inline password; prefer credentials.passwordFile when possible", tunnel.ID)
+	}
+	plan.AddWrite("render FortiGate SSL VPN profile "+tunnel.ID, confPath, "0600", renderFortiGateSSLConfig(tunnel))
+	plan.AddWrite("render FortiGate SSL VPN service "+tunnel.ID, "/etc/systemd/system/"+serviceName, "0644", renderFortiGateSSLService(tunnel, confPath))
+	plan.AddCommand("reload systemd for FortiGate SSL VPN "+tunnel.ID, "systemctl", "daemon-reload")
+	plan.AddCommand("enable FortiGate SSL VPN tunnel "+tunnel.ID, "systemctl", "enable", "--now", serviceName)
+}
+
+func addProxyTunnelServicePlan(plan *control.Plan, tunnel config.Tunnel) {
+	engine := tunnel.Options["engine"]
+	if engine == "" {
+		engine = defaultProxyEngine(tunnel.Type)
+	}
+	configFile := tunnel.Credentials["configFile"]
+	if configFile == "" {
+		plan.AddWarning("%s tunnel %s has no credentials.configFile", tunnel.Type, tunnel.ID)
+		return
+	}
+	serviceName := "las-" + engine + "-" + tunnel.ID + ".service"
+	plan.AddWrite("render "+engine+" tunnel service "+tunnel.ID, "/etc/systemd/system/"+serviceName, "0644", renderProxyTunnelService(engine, tunnel, configFile))
+	plan.AddCommand("reload systemd for "+engine+" tunnel "+tunnel.ID, "systemctl", "daemon-reload")
+	plan.AddCommand("enable "+engine+" tunnel "+tunnel.ID, "systemctl", "enable", "--now", serviceName)
+}
+
+func renderManagedCertificateMetadata(cert config.ManagedCertificate) string {
+	var b strings.Builder
+	b.WriteString("{\n")
+	b.WriteString(fmt.Sprintf("  \"id\": %q,\n", cert.ID))
+	b.WriteString(fmt.Sprintf("  \"domains\": %q,\n", strings.Join(cert.Domains, ",")))
+	b.WriteString(fmt.Sprintf("  \"certFile\": %q,\n", cert.CertFile))
+	b.WriteString(fmt.Sprintf("  \"keyFile\": %q,\n", cert.KeyFile))
+	b.WriteString(fmt.Sprintf("  \"chainFile\": %q,\n", cert.ChainFile))
+	b.WriteString(fmt.Sprintf("  \"fullChainFile\": %q,\n", cert.FullChainFile))
+	b.WriteString(fmt.Sprintf("  \"ownerService\": %q,\n", cert.OwnerService))
+	b.WriteString(fmt.Sprintf("  \"renewHook\": %q\n", cert.RenewHook))
+	b.WriteString("}\n")
+	return b.String()
+}
+
+func renderCertbotDeployHook(store config.CertificateStore) string {
+	var b strings.Builder
+	b.WriteString("#!/usr/bin/env bash\nset -euo pipefail\n")
+	seen := map[string]struct{}{}
+	for _, cert := range store.Certificates {
+		if cert.RenewHook != "" {
+			b.WriteString(cert.RenewHook + "\n")
+		}
+		if cert.OwnerService != "" {
+			seen[cert.OwnerService] = struct{}{}
+		}
+	}
+	for _, cert := range store.LetsEncrypt.Certificates {
+		if cert.DeployHook != "" {
+			continue
+		}
+		managedName := cert.ID + ".service"
+		if strings.HasPrefix(cert.ID, "las-") {
+			seen[managedName] = struct{}{}
+		}
+	}
+	for service := range seen {
+		b.WriteString("systemctl try-reload-or-restart " + shellQuote(service) + " || true\n")
+	}
+	return b.String()
+}
+
+func openVPNProfilePath(tunnel config.Tunnel) string {
+	if tunnel.Direction == "server" {
+		return "/etc/openvpn/server/" + tunnel.ID + ".conf"
+	}
+	return "/etc/openvpn/client/" + tunnel.ID + ".conf"
+}
+
+func generatedOpenVPNAuthPath(tunnel config.Tunnel) string {
+	if tunnel.Credentials["authFile"] != "" {
+		return ""
+	}
+	if tunnel.Credentials["username"] != "" && tunnel.Credentials["password"] != "" {
+		return "/etc/las/openvpn/" + tunnel.ID + ".auth"
+	}
+	return ""
+}
+
+func openVPNAuthPath(tunnel config.Tunnel) string {
+	if tunnel.Credentials["authFile"] != "" {
+		return tunnel.Credentials["authFile"]
+	}
+	return generatedOpenVPNAuthPath(tunnel)
+}
+
+func renderOpenVPNConfig(tunnel config.Tunnel) string {
+	var b strings.Builder
+	proto := optionDefault(tunnel.Options, "proto", "udp")
+	port := optionDefault(tunnel.Options, "port", "1194")
+	host, endpointPort := endpointHostPort(tunnel.RemoteEndpoint)
+	if endpointPort != "" {
+		port = endpointPort
+	}
+	b.WriteString("# Managed by LAS.\n")
+	b.WriteString("dev " + tunnel.InterfaceName + "\n")
+	if devType := tunnel.Options["devType"]; devType != "" {
+		b.WriteString("dev-type " + devType + "\n")
+	}
+	b.WriteString("proto " + proto + "\n")
+	b.WriteString("port " + port + "\n")
+	b.WriteString("topology subnet\npersist-key\npersist-tun\n")
+	if tunnel.MTU > 0 {
+		b.WriteString("tun-mtu " + strconv.Itoa(tunnel.MTU) + "\n")
+	}
+	if tunnel.Direction == "server" {
+		b.WriteString("mode server\ntls-server\n")
+		if serverNet := tunnel.Options["server"]; serverNet != "" {
+			b.WriteString("server " + serverNet + "\n")
+		}
+		if pool := tunnel.Options["ifconfigPool"]; pool != "" {
+			b.WriteString("ifconfig-pool " + pool + "\n")
+		}
+		if ccd := tunnel.Options["clientConfigDir"]; ccd != "" {
+			b.WriteString("client-config-dir " + ccd + "\n")
+		}
+		for _, route := range optionList(tunnel.Options["pushRoutes"]) {
+			b.WriteString("push \"route " + route + "\"\n")
+		}
+		for _, dns := range tunnel.DNS {
+			b.WriteString("push \"dhcp-option DNS " + dns + "\"\n")
+		}
+	} else {
+		b.WriteString("client\nnobind\nremote-cert-tls server\n")
+		if host != "" {
+			b.WriteString("remote " + host + " " + port + "\n")
+		}
+		if authPath := openVPNAuthPath(tunnel); authPath != "" {
+			b.WriteString("auth-user-pass " + authPath + "\n")
+		}
+		if boolOption(tunnel.Options["routeNoPull"]) {
+			b.WriteString("route-nopull\n")
+		}
+		if boolOption(tunnel.Options["redirectGateway"]) {
+			b.WriteString("redirect-gateway def1\n")
+		}
+	}
+	for _, route := range optionList(tunnel.Options["routes"]) {
+		b.WriteString("route " + route + "\n")
+	}
+	if value := tunnel.Options["ifconfig"]; value != "" {
+		b.WriteString("ifconfig " + value + "\n")
+	}
+	writeOpenVPNCredential(&b, "ca", tunnel.Credentials["caFile"])
+	writeOpenVPNCredential(&b, "cert", tunnel.Credentials["certFile"])
+	writeOpenVPNCredential(&b, "key", tunnel.Credentials["keyFile"])
+	writeOpenVPNCredential(&b, "pkcs12", tunnel.Credentials["pkcs12File"])
+	writeOpenVPNCredential(&b, "dh", tunnel.Credentials["dhFile"])
+	writeOpenVPNCredential(&b, "tls-crypt", tunnel.Credentials["tlsCryptFile"])
+	writeOpenVPNCredential(&b, "tls-auth", tunnel.Credentials["tlsAuthFile"])
+	for _, key := range []string{"cipher", "dataCiphers", "auth", "compress", "management"} {
+		if value := tunnel.Options[key]; value != "" {
+			b.WriteString(openVPNOptionName(key) + " " + value + "\n")
+		}
+	}
+	verb := optionDefault(tunnel.Options, "verb", "3")
+	b.WriteString("verb " + verb + "\n")
+	b.WriteString("setenv LAS_TUNNEL_ID " + tunnel.ID + "\n")
+	return b.String()
+}
+
+func writeOpenVPNCredential(b *strings.Builder, directive, value string) {
+	if value != "" {
+		b.WriteString(directive + " " + value + "\n")
+	}
+}
+
+func openVPNOptionName(key string) string {
+	switch key {
+	case "dataCiphers":
+		return "data-ciphers"
+	default:
+		return key
+	}
+}
+
+func openConnectProtocol(tunnelType string, options map[string]string) string {
+	if options["protocol"] != "" {
+		return options["protocol"]
+	}
+	switch tunnelType {
+	case "globalprotect":
+		return "gp"
+	case "pulse-secure":
+		return "pulse"
+	default:
+		return "anyconnect"
+	}
+}
+
+func renderOpenConnectEnv(tunnel config.Tunnel, protocol string) string {
+	script := optionDefault(tunnel.Options, "script", "/etc/vpnc/vpnc-script")
+	extra := []string{}
+	if serverCert := tunnel.Options["serverCert"]; serverCert != "" {
+		extra = append(extra, "--servercert", serverCert)
+	}
+	if caFile := tunnel.Credentials["caFile"]; caFile != "" {
+		extra = append(extra, "--cafile", caFile)
+	}
+	if csdWrapper := tunnel.Options["csdWrapper"]; csdWrapper != "" {
+		extra = append(extra, "--csd-wrapper", csdWrapper)
+	}
+	return strings.Join([]string{
+		systemdEnvLine("VPN_SERVER", tunnel.RemoteEndpoint),
+		systemdEnvLine("VPN_PROTOCOL", protocol),
+		systemdEnvLine("VPN_INTERFACE", tunnel.InterfaceName),
+		systemdEnvLine("VPN_SCRIPT", script),
+		systemdEnvLine("VPN_USER", tunnel.Credentials["username"]),
+		systemdEnvLine("PASSWORD_FILE", tunnel.Credentials["passwordFile"]),
+		systemdEnvLine("COOKIE_FILE", tunnel.Credentials["cookieFile"]),
+		systemdEnvLine("EXTRA_ARGS", joinArgs(extra)),
+	}, "")
+}
+
+func renderOpenConnectService(envPath string) string {
+	return "[Unit]\n" +
+		"Description=LAS OpenConnect VPN tunnel\n" +
+		"After=network-online.target\nWants=network-online.target\n\n" +
+		"[Service]\n" +
+		"Type=simple\n" +
+		"EnvironmentFile=" + envPath + "\n" +
+		"ExecStart=/bin/sh -c 'if [ -n \"${COOKIE_FILE:-}\" ]; then exec /usr/sbin/openconnect $EXTRA_ARGS --protocol \"$VPN_PROTOCOL\" --interface \"$VPN_INTERFACE\" --script \"$VPN_SCRIPT\" --user \"$VPN_USER\" --cookie-on-stdin \"$VPN_SERVER\" < \"$COOKIE_FILE\"; elif [ -n \"${PASSWORD_FILE:-}\" ]; then exec /usr/sbin/openconnect $EXTRA_ARGS --protocol \"$VPN_PROTOCOL\" --interface \"$VPN_INTERFACE\" --script \"$VPN_SCRIPT\" --user \"$VPN_USER\" --passwd-on-stdin \"$VPN_SERVER\" < \"$PASSWORD_FILE\"; else exec /usr/sbin/openconnect $EXTRA_ARGS --protocol \"$VPN_PROTOCOL\" --interface \"$VPN_INTERFACE\" --script \"$VPN_SCRIPT\" --user \"$VPN_USER\" \"$VPN_SERVER\"; fi'\n" +
+		"Restart=always\nRestartSec=5s\n\n" +
+		"[Install]\nWantedBy=multi-user.target\n"
+}
+
+func renderFortiGateSSLConfig(tunnel config.Tunnel) string {
+	host, port := endpointHostPort(tunnel.RemoteEndpoint)
+	if port == "" {
+		port = optionDefault(tunnel.Options, "port", "443")
+	}
+	var b strings.Builder
+	b.WriteString("# Managed by LAS.\n")
+	b.WriteString("host = " + host + "\n")
+	b.WriteString("port = " + port + "\n")
+	if username := tunnel.Credentials["username"]; username != "" {
+		b.WriteString("username = " + username + "\n")
+	}
+	if password := tunnel.Credentials["password"]; password != "" {
+		b.WriteString("password = " + password + "\n")
+	}
+	if trusted := tunnel.Options["trustedCert"]; trusted != "" {
+		b.WriteString("trusted-cert = " + trusted + "\n")
+	}
+	if caFile := tunnel.Credentials["caFile"]; caFile != "" {
+		b.WriteString("ca-file = " + caFile + "\n")
+	}
+	if tunnel.InterfaceName != "" {
+		b.WriteString("pppd-ifname = " + tunnel.InterfaceName + "\n")
+	}
+	if tunnel.Options["setDNS"] != "" {
+		b.WriteString("set-dns = " + tunnel.Options["setDNS"] + "\n")
+	}
+	if tunnel.Options["realm"] != "" {
+		b.WriteString("realm = " + tunnel.Options["realm"] + "\n")
+	}
+	return b.String()
+}
+
+func renderFortiGateSSLService(tunnel config.Tunnel, confPath string) string {
+	args := "/usr/bin/openfortivpn -c " + shellQuote(confPath)
+	if passwordFile := tunnel.Credentials["passwordFile"]; passwordFile != "" {
+		args += " --password-file=" + shellQuote(passwordFile)
+	}
+	return "[Unit]\n" +
+		"Description=LAS FortiGate SSL VPN tunnel\n" +
+		"After=network-online.target\nWants=network-online.target\n\n" +
+		"[Service]\n" +
+		"Type=simple\n" +
+		"ExecStart=" + args + "\n" +
+		"Restart=always\nRestartSec=5s\n\n" +
+		"[Install]\nWantedBy=multi-user.target\n"
+}
+
+func renderProxyTunnelService(engine string, tunnel config.Tunnel, configFile string) string {
+	binary := "/usr/local/bin/" + engine
+	if override := tunnel.Options["binary"]; override != "" {
+		binary = override
+	}
+	args := "run -c " + shellQuote(configFile)
+	if engine == "xray" {
+		args = "run -config " + shellQuote(configFile)
+	}
+	return "[Unit]\n" +
+		"Description=LAS " + engine + " tunnel " + tunnel.ID + "\n" +
+		"After=network-online.target\nWants=network-online.target\n\n" +
+		"[Service]\n" +
+		"Type=simple\n" +
+		"ExecStart=" + binary + " " + args + "\n" +
+		"Restart=always\nRestartSec=5s\nLimitNOFILE=1048576\n\n" +
+		"[Install]\nWantedBy=multi-user.target\n"
+}
+
+func endpointHostPort(endpoint string) (string, string) {
+	value := strings.TrimPrefix(strings.TrimPrefix(endpoint, "https://"), "http://")
+	if idx := strings.IndexByte(value, '/'); idx >= 0 {
+		value = value[:idx]
+	}
+	if strings.Count(value, ":") == 1 {
+		parts := strings.SplitN(value, ":", 2)
+		return parts[0], parts[1]
+	}
+	return strings.Trim(value, "[]"), ""
+}
+
+func optionDefault(options map[string]string, key, fallback string) string {
+	if value := options[key]; value != "" {
+		return value
+	}
+	return fallback
+}
+
+func optionList(value string) []string {
+	if value == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n'
+	})
+	out := []string{}
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func boolOption(value string) bool {
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	default:
+		return false
+	}
+}
+
+func systemdEnvLine(key, value string) string {
+	return key + "=" + strconv.Quote(value) + "\n"
 }
 
 func addIPTunnelPlan(plan *control.Plan, tunnel config.Tunnel) {
@@ -214,6 +706,14 @@ func defaultProxyEngine(tunnelType string) string {
 
 func joinCommand(program string, args []string) string {
 	parts := append([]string{program}, args...)
+	for i, part := range parts {
+		parts[i] = shellQuote(part)
+	}
+	return strings.Join(parts, " ")
+}
+
+func joinArgs(args []string) string {
+	parts := append([]string{}, args...)
 	for i, part := range parts {
 		parts[i] = shellQuote(part)
 	}
@@ -319,16 +819,49 @@ func addSecurityPlan(plan *control.Plan, cfg config.Config) {
 func addServicesPlan(plan *control.Plan, cfg config.Config) {
 	services := cfg.Services
 	if services.DHCPServer.Enabled || services.DNSServer.Enabled {
-		plan.AddWrite("render dnsmasq service profile", "/etc/las/dnsmasq-services.conf", "0600", renderDNSDHCPConfig(cfg))
-		plan.AddCommand("enable dnsmasq for DHCP/DNS", "systemctl", "enable", "--now", "dnsmasq")
-		plan.AddWarning("dnsmasq renderer is a baseline service profile; full per-interface DHCP reservations, options, and DNS views are TODO")
+		switch services.DNSServer.Engine {
+		case "", "dnsmasq":
+			plan.AddWrite("render dnsmasq service profile", "/etc/dnsmasq.d/las-services.conf", "0644", renderDNSMasqServiceConfig(cfg))
+			plan.AddCommand("enable dnsmasq for DHCP/DNS", "systemctl", "enable", "--now", "dnsmasq")
+		case "unbound":
+			if services.DHCPServer.Enabled {
+				plan.AddWrite("render dnsmasq DHCP-only profile", "/etc/dnsmasq.d/las-dhcp.conf", "0644", renderDNSMasqServiceConfig(cfg))
+				plan.AddCommand("enable dnsmasq for DHCP", "systemctl", "enable", "--now", "dnsmasq")
+			}
+			plan.AddWrite("render unbound DNS server profile", "/etc/unbound/unbound.conf.d/las.conf", "0644", renderUnboundConfig(services.DNSServer))
+			plan.AddCommand("enable unbound DNS server", "systemctl", "enable", "--now", "unbound")
+		case "bind":
+			if services.DHCPServer.Enabled {
+				plan.AddWrite("render dnsmasq DHCP-only profile", "/etc/dnsmasq.d/las-dhcp.conf", "0644", renderDNSMasqServiceConfig(cfg))
+				plan.AddCommand("enable dnsmasq for DHCP", "systemctl", "enable", "--now", "dnsmasq")
+			}
+			plan.AddWrite("render BIND local zone include", "/etc/bind/named.conf.las", "0644", renderBINDConfig(services.DNSServer))
+			plan.AddCommand("enable BIND DNS server", "systemctl", "enable", "--now", "bind9")
+			plan.AddWarning("BIND profile is rendered as /etc/bind/named.conf.las; include it from named.conf.local before relying on it")
+		}
 	}
 	if services.DHCPClient.Enabled {
 		plan.AddWarning("DHCP client is modeled on interfaces %s; use systemd-networkd, NetworkManager, or dhclient renderer TODO", strings.Join(services.DHCPClient.Interfaces, ","))
 	}
+	if services.DNSClient.Enabled {
+		if services.DNSClient.UseSystemdResolved {
+			plan.AddCommand("ensure systemd-resolved config directory", "install", "-d", "-m", "0755", "/etc/systemd/resolved.conf.d")
+			plan.AddWrite("render systemd-resolved DNS client profile", "/etc/systemd/resolved.conf.d/las.conf", "0644", renderResolvedConfig(services.DNSClient))
+			plan.AddCommand("enable systemd-resolved DNS client", "systemctl", "enable", "--now", "systemd-resolved")
+		}
+		if services.DNSClient.WriteResolvConf {
+			plan.AddWrite("render resolv.conf DNS client profile", "/etc/resolv.conf", "0644", renderResolvConf(services.DNSClient))
+		}
+	}
 	if services.NTPServer.Enabled || services.NTPClient.Enabled {
-		plan.AddWrite("render chrony profile", "/etc/las/chrony.conf", "0600", renderChronyConfig(services.NTPServer, services.NTPClient))
-		plan.AddCommand("enable chrony", "systemctl", "enable", "--now", "chrony")
+		switch services.NTPServer.Engine {
+		case "", "chrony":
+			plan.AddWrite("render chrony profile", "/etc/chrony/conf.d/las.conf", "0644", renderChronyConfig(services.NTPServer, services.NTPClient))
+			plan.AddCommand("enable chrony", "systemctl", "enable", "--now", "chrony")
+		case "ntpd":
+			plan.AddWrite("render ntpsec profile", "/etc/ntpsec/ntp.conf", "0644", renderNTPDConfig(services.NTPServer, services.NTPClient))
+			plan.AddCommand("enable ntpsec", "systemctl", "enable", "--now", "ntpsec")
+		}
 	}
 	if services.MPLS.Enabled {
 		plan.AddWarning("MPLS is modeled for links %s; enable kernel MPLS modules and complete FRR LDP/VPLS renderer TODO", strings.Join(services.MPLS.Interfaces, ","))
@@ -487,22 +1020,60 @@ func addAutomationPlan(plan *control.Plan, automation config.AutomationConfig) {
 	}
 }
 
-func renderDNSDHCPConfig(cfg config.Config) string {
+func renderDNSMasqServiceConfig(cfg config.Config) string {
 	var b strings.Builder
 	b.WriteString("# Managed by LAS.\n")
 	if cfg.Services.DNSServer.Enabled {
 		b.WriteString("domain-needed\nbogus-priv\n")
+		if cfg.Services.DNSServer.RebindProtection {
+			b.WriteString("stop-dns-rebind\n")
+		}
+		if cfg.Services.DNSServer.StrictOrder {
+			b.WriteString("strict-order\n")
+		}
+		if cfg.Services.DNSServer.DNSSEC {
+			b.WriteString("dnssec\ntrust-anchor=.,20326,8,2,E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D\n")
+		}
+		if cfg.Services.DNSServer.BindInterfaces {
+			b.WriteString("bind-interfaces\n")
+		}
+		if cfg.Services.DNSServer.CacheSize > 0 {
+			b.WriteString("cache-size=" + strconv.Itoa(cfg.Services.DNSServer.CacheSize) + "\n")
+		}
 		for _, iface := range cfg.Services.DNSServer.Listen {
 			b.WriteString("interface=" + iface + "\n")
+		}
+		for _, address := range cfg.Services.DNSServer.ListenAddresses {
+			b.WriteString("listen-address=" + address + "\n")
+		}
+		if len(cfg.Services.DNSServer.Forwarders) > 0 {
+			b.WriteString("no-resolv\n")
 		}
 		for _, forwarder := range cfg.Services.DNSServer.Forwarders {
 			b.WriteString("server=" + forwarder + "\n")
 		}
+		for _, zone := range cfg.Services.DNSServer.ConditionalForwarders {
+			for _, upstream := range zone.Upstreams {
+				b.WriteString("server=/" + zone.Domain + "/" + upstream + "\n")
+			}
+		}
 		for _, domain := range cfg.Services.DNSServer.LocalDomains {
 			b.WriteString("local=/" + domain + "/\n")
 		}
+		for _, override := range cfg.Services.DNSServer.AddressOverrides {
+			b.WriteString("address=/" + override.Domain + "/" + override.Address + "\n")
+		}
+		for _, record := range cfg.Services.DNSServer.Records {
+			b.WriteString(renderDNSMasqRecord(record))
+		}
 	}
 	if cfg.Services.DHCPServer.Enabled {
+		if cfg.Services.DHCPServer.Authoritative {
+			b.WriteString("dhcp-authoritative\n")
+		}
+		if cfg.Services.DHCPServer.LeaseFile != "" {
+			b.WriteString("dhcp-leasefile=" + cfg.Services.DHCPServer.LeaseFile + "\n")
+		}
 		for _, iface := range cfg.Interfaces {
 			if iface.DHCPServer == nil {
 				continue
@@ -516,6 +1087,26 @@ func renderDNSDHCPConfig(cfg config.Config) string {
 				b.WriteString("domain=" + iface.DHCPServer.Domain + "\n")
 			}
 		}
+		for _, lease := range cfg.Services.DHCPServer.StaticLeases {
+			values := []string{lease.MAC}
+			if lease.IP != "" {
+				values = append(values, lease.IP)
+			}
+			if lease.Hostname != "" {
+				values = append(values, lease.Hostname)
+			}
+			if lease.Lease != "" {
+				values = append(values, lease.Lease)
+			}
+			b.WriteString("dhcp-host=" + strings.Join(values, ",") + "\n")
+		}
+		for _, option := range cfg.Services.DHCPServer.Options {
+			prefix := "dhcp-option="
+			if option.Tag != "" {
+				prefix += "tag:" + option.Tag + ","
+			}
+			b.WriteString(prefix + option.Code + "," + option.Value + "\n")
+		}
 	}
 	return b.String()
 }
@@ -523,16 +1114,224 @@ func renderDNSDHCPConfig(cfg config.Config) string {
 func renderChronyConfig(server config.NTPServiceConfig, client config.NTPClientConfig) string {
 	var b strings.Builder
 	b.WriteString("# Managed by LAS.\n")
+	if client.Makestep {
+		b.WriteString("makestep 1.0 3\n")
+	}
 	for _, upstream := range client.Servers {
-		b.WriteString("pool " + upstream + " iburst\n")
+		b.WriteString("server " + upstream + " iburst" + ntsSuffix(client.NTS) + "\n")
+	}
+	for _, upstream := range client.Pools {
+		b.WriteString("pool " + upstream + " iburst" + ntsSuffix(client.NTS) + "\n")
+	}
+	for _, upstream := range client.Peers {
+		b.WriteString("peer " + upstream + " iburst\n")
+	}
+	for _, upstream := range client.FallbackServers {
+		b.WriteString("server " + upstream + " iburst prefer\n")
 	}
 	if server.Enabled {
 		for _, iface := range server.Listen {
 			b.WriteString("# serve NTP on " + iface + "\n")
 		}
-		b.WriteString("local stratum 10\n")
+		for _, cidr := range server.AllowCIDRs {
+			b.WriteString("allow " + cidr + "\n")
+		}
+		stratum := server.LocalStratum
+		if stratum == 0 {
+			stratum = 10
+		}
+		b.WriteString("local stratum " + strconv.Itoa(stratum) + "\n")
+		if server.NTS.Enabled {
+			b.WriteString("ntsservercert " + server.NTS.CertFile + "\n")
+			b.WriteString("ntsserverkey " + server.NTS.KeyFile + "\n")
+		}
 	}
 	return b.String()
+}
+
+func renderDNSMasqRecord(record config.DNSRecord) string {
+	recordType := strings.ToUpper(record.Type)
+	switch recordType {
+	case "", "A", "AAAA":
+		return "host-record=" + record.Name + "," + record.Value + "\n"
+	case "CNAME":
+		return "cname=" + record.Name + "," + record.Value + "\n"
+	case "TXT":
+		return "txt-record=" + record.Name + "," + record.Value + "\n"
+	case "MX":
+		return "mx-host=" + record.Name + "," + record.Value + "\n"
+	case "SRV":
+		return "srv-host=" + record.Name + "," + record.Value + "\n"
+	case "PTR":
+		return "ptr-record=" + record.Name + "," + record.Value + "\n"
+	default:
+		return "# unsupported-record=" + record.Name + "," + record.Type + "," + record.Value + "\n"
+	}
+}
+
+func renderUnboundConfig(dns config.DNSServiceConfig) string {
+	var b strings.Builder
+	b.WriteString("# Managed by LAS.\nserver:\n")
+	if dns.CacheSize > 0 {
+		b.WriteString("  msg-cache-size: " + strconv.Itoa(dns.CacheSize) + "m\n")
+		b.WriteString("  rrset-cache-size: " + strconv.Itoa(dns.CacheSize*2) + "m\n")
+	}
+	if dns.DNSSEC {
+		b.WriteString("  auto-trust-anchor-file: \"/var/lib/unbound/root.key\"\n")
+	}
+	if dns.RebindProtection {
+		b.WriteString("  private-address: 10.0.0.0/8\n  private-address: 172.16.0.0/12\n  private-address: 192.168.0.0/16\n")
+	}
+	for _, iface := range dns.Listen {
+		b.WriteString("  # listen interface: " + iface + "\n")
+	}
+	if len(dns.ListenAddresses) == 0 {
+		b.WriteString("  interface: 0.0.0.0\n")
+	} else {
+		for _, address := range dns.ListenAddresses {
+			b.WriteString("  interface: " + address + "\n")
+		}
+	}
+	for _, domain := range dns.LocalDomains {
+		b.WriteString("  local-zone: \"" + domain + ".\" static\n")
+	}
+	for _, override := range dns.AddressOverrides {
+		b.WriteString("  local-data: \"" + override.Domain + " A " + override.Address + "\"\n")
+	}
+	for _, record := range dns.Records {
+		b.WriteString("  local-data: \"" + record.Name + " " + strings.ToUpper(record.Type) + " " + record.Value + "\"\n")
+	}
+	if len(dns.Forwarders) > 0 {
+		b.WriteString("forward-zone:\n  name: \".\"\n")
+		for _, forwarder := range dns.Forwarders {
+			b.WriteString("  forward-addr: " + forwarder + "\n")
+		}
+	}
+	for _, zone := range dns.ConditionalForwarders {
+		b.WriteString("forward-zone:\n  name: \"" + zone.Domain + ".\"\n")
+		for _, upstream := range zone.Upstreams {
+			b.WriteString("  forward-addr: " + upstream + "\n")
+		}
+	}
+	return b.String()
+}
+
+func renderBINDConfig(dns config.DNSServiceConfig) string {
+	var b strings.Builder
+	b.WriteString("// Managed by LAS. Include this file from /etc/bind/named.conf.local.\n")
+	b.WriteString("options {\n")
+	if len(dns.Forwarders) > 0 {
+		b.WriteString("  forwarders {\n")
+		for _, forwarder := range dns.Forwarders {
+			b.WriteString("    " + forwarder + ";\n")
+		}
+		b.WriteString("  };\n  forward only;\n")
+	}
+	if len(dns.ListenAddresses) > 0 {
+		b.WriteString("  listen-on { ")
+		for _, address := range dns.ListenAddresses {
+			b.WriteString(address + "; ")
+		}
+		b.WriteString("};\n")
+	}
+	if dns.DNSSEC {
+		b.WriteString("  dnssec-validation auto;\n")
+	}
+	b.WriteString("};\n")
+	for _, zone := range dns.ConditionalForwarders {
+		b.WriteString("zone \"" + zone.Domain + "\" { type forward; forwarders { ")
+		for _, upstream := range zone.Upstreams {
+			b.WriteString(upstream + "; ")
+		}
+		b.WriteString("}; };\n")
+	}
+	if len(dns.Records) > 0 || len(dns.AddressOverrides) > 0 {
+		b.WriteString("// Static local records are modeled; generate zone files per domain before production BIND use.\n")
+	}
+	return b.String()
+}
+
+func renderResolvedConfig(client config.DNSClientConfig) string {
+	var b strings.Builder
+	b.WriteString("# Managed by LAS.\n[Resolve]\n")
+	if len(client.Resolvers) > 0 {
+		b.WriteString("DNS=" + strings.Join(client.Resolvers, " ") + "\n")
+	}
+	if len(client.FallbackResolvers) > 0 {
+		b.WriteString("FallbackDNS=" + strings.Join(client.FallbackResolvers, " ") + "\n")
+	}
+	if len(client.Search) > 0 {
+		b.WriteString("Domains=" + strings.Join(client.Search, " ") + "\n")
+	}
+	if client.DNSOverTLS {
+		b.WriteString("DNSOverTLS=yes\n")
+	}
+	if client.DNSSEC != "" {
+		b.WriteString("DNSSEC=" + client.DNSSEC + "\n")
+	}
+	return b.String()
+}
+
+func renderResolvConf(client config.DNSClientConfig) string {
+	var b strings.Builder
+	b.WriteString("# Managed by LAS.\n")
+	for _, resolver := range client.Resolvers {
+		b.WriteString("nameserver " + resolverNameServer(resolver) + "\n")
+	}
+	if len(client.Search) > 0 {
+		b.WriteString("search " + strings.Join(client.Search, " ") + "\n")
+	}
+	return b.String()
+}
+
+func renderNTPDConfig(server config.NTPServiceConfig, client config.NTPClientConfig) string {
+	var b strings.Builder
+	b.WriteString("# Managed by LAS.\n")
+	for _, upstream := range client.Servers {
+		b.WriteString("server " + upstream + " iburst\n")
+	}
+	for _, upstream := range client.Pools {
+		b.WriteString("pool " + upstream + " iburst\n")
+	}
+	for _, upstream := range client.Peers {
+		b.WriteString("peer " + upstream + " iburst\n")
+	}
+	for _, upstream := range client.FallbackServers {
+		b.WriteString("server " + upstream + " iburst prefer\n")
+	}
+	b.WriteString("restrict default kod nomodify nopeer noquery limited\nrestrict 127.0.0.1\nrestrict ::1\n")
+	if server.Enabled {
+		for _, cidr := range server.AllowCIDRs {
+			b.WriteString("# allow " + cidr + "\n")
+		}
+		stratum := server.LocalStratum
+		if stratum == 0 {
+			stratum = 10
+		}
+		b.WriteString("tos orphan " + strconv.Itoa(stratum) + "\n")
+	}
+	if client.NTS || server.NTS.Enabled {
+		b.WriteString("# NTS is supported through chrony in LAS; ntpsec NTS rendering is intentionally conservative.\n")
+	}
+	return b.String()
+}
+
+func ntsSuffix(enabled bool) string {
+	if enabled {
+		return " nts"
+	}
+	return ""
+}
+
+func resolverNameServer(value string) string {
+	cleaned := strings.TrimPrefix(value, "tls://")
+	if strings.Contains(cleaned, "#") {
+		cleaned = strings.SplitN(cleaned, "#", 2)[0]
+	}
+	if strings.Contains(cleaned, ":") && strings.Count(cleaned, ":") == 1 {
+		return strings.SplitN(cleaned, ":", 2)[0]
+	}
+	return strings.Trim(cleaned, "[]")
 }
 
 func renderKeepalived(entries []config.VRRP) string {

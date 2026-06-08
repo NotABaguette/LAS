@@ -176,19 +176,24 @@ type SecurityConfig struct {
 }
 
 type ServicesConfig struct {
-	DHCPServer DHCPServiceConfig `json:"dhcpServer"`
-	DHCPClient DHCPClientConfig  `json:"dhcpClient"`
-	DNSServer  DNSServiceConfig  `json:"dnsServer"`
-	DNSClient  DNSClientConfig   `json:"dnsClient"`
-	NTPServer  NTPServiceConfig  `json:"ntpServer"`
-	NTPClient  NTPClientConfig   `json:"ntpClient"`
-	MPLS       MPLSConfig        `json:"mpls"`
+	DHCPServer       DHCPServiceConfig `json:"dhcpServer"`
+	DHCPClient       DHCPClientConfig  `json:"dhcpClient"`
+	DNSServer        DNSServiceConfig  `json:"dnsServer"`
+	DNSClient        DNSClientConfig   `json:"dnsClient"`
+	NTPServer        NTPServiceConfig  `json:"ntpServer"`
+	NTPClient        NTPClientConfig   `json:"ntpClient"`
+	CertificateStore CertificateStore  `json:"certificateStore"`
+	MPLS             MPLSConfig        `json:"mpls"`
 }
 
 type DHCPServiceConfig struct {
-	Enabled bool     `json:"enabled"`
-	Engine  string   `json:"engine"`
-	Listen  []string `json:"listen"`
+	Enabled       bool              `json:"enabled"`
+	Engine        string            `json:"engine"`
+	Listen        []string          `json:"listen"`
+	Authoritative bool              `json:"authoritative"`
+	LeaseFile     string            `json:"leaseFile"`
+	StaticLeases  []DHCPStaticLease `json:"staticLeases"`
+	Options       []DHCPOption      `json:"options"`
 }
 
 type DHCPClientConfig struct {
@@ -196,29 +201,64 @@ type DHCPClientConfig struct {
 	Interfaces []string `json:"interfaces"`
 }
 
+type DHCPStaticLease struct {
+	Hostname string `json:"hostname"`
+	MAC      string `json:"mac"`
+	IP       string `json:"ip"`
+	Lease    string `json:"lease"`
+}
+
+type DHCPOption struct {
+	Tag   string `json:"tag"`
+	Code  string `json:"code"`
+	Value string `json:"value"`
+}
+
 type DNSServiceConfig struct {
-	Enabled      bool     `json:"enabled"`
-	Engine       string   `json:"engine"`
-	Listen       []string `json:"listen"`
-	Forwarders   []string `json:"forwarders"`
-	LocalDomains []string `json:"localDomains"`
+	Enabled               bool             `json:"enabled"`
+	Engine                string           `json:"engine"`
+	Listen                []string         `json:"listen"`
+	ListenAddresses       []string         `json:"listenAddresses"`
+	Forwarders            []string         `json:"forwarders"`
+	LocalDomains          []string         `json:"localDomains"`
+	ConditionalForwarders []DNSForwardZone `json:"conditionalForwarders"`
+	Records               []DNSRecord      `json:"records"`
+	AddressOverrides      []DNSOverride    `json:"addressOverrides"`
+	CacheSize             int              `json:"cacheSize"`
+	BindInterfaces        bool             `json:"bindInterfaces"`
+	DNSSEC                bool             `json:"dnssec"`
+	RebindProtection      bool             `json:"rebindProtection"`
+	StrictOrder           bool             `json:"strictOrder"`
 }
 
 type DNSClientConfig struct {
-	Enabled   bool     `json:"enabled"`
-	Resolvers []string `json:"resolvers"`
-	Search    []string `json:"search"`
+	Enabled            bool     `json:"enabled"`
+	Resolvers          []string `json:"resolvers"`
+	FallbackResolvers  []string `json:"fallbackResolvers"`
+	Search             []string `json:"search"`
+	UseSystemdResolved bool     `json:"useSystemdResolved"`
+	WriteResolvConf    bool     `json:"writeResolvConf"`
+	DNSOverTLS         bool     `json:"dnsOverTLS"`
+	DNSSEC             string   `json:"dnssec"`
 }
 
 type NTPServiceConfig struct {
-	Enabled bool     `json:"enabled"`
-	Engine  string   `json:"engine"`
-	Listen  []string `json:"listen"`
+	Enabled      bool      `json:"enabled"`
+	Engine       string    `json:"engine"`
+	Listen       []string  `json:"listen"`
+	AllowCIDRs   []string  `json:"allowCidrs"`
+	LocalStratum int       `json:"localStratum"`
+	NTS          NTSConfig `json:"nts"`
 }
 
 type NTPClientConfig struct {
-	Enabled bool     `json:"enabled"`
-	Servers []string `json:"servers"`
+	Enabled         bool     `json:"enabled"`
+	Servers         []string `json:"servers"`
+	Pools           []string `json:"pools"`
+	Peers           []string `json:"peers"`
+	FallbackServers []string `json:"fallbackServers"`
+	NTS             bool     `json:"nts"`
+	Makestep        bool     `json:"makestep"`
 }
 
 type MPLSConfig struct {
@@ -226,6 +266,79 @@ type MPLSConfig struct {
 	Interfaces []string `json:"interfaces"`
 	LDP        bool     `json:"ldp"`
 	VRF        string   `json:"vrf"`
+}
+
+type DNSForwardZone struct {
+	Domain    string   `json:"domain"`
+	Upstreams []string `json:"upstreams"`
+}
+
+type DNSRecord struct {
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	Value string `json:"value"`
+	TTL   int    `json:"ttl"`
+}
+
+type DNSOverride struct {
+	Domain  string `json:"domain"`
+	Address string `json:"address"`
+}
+
+type NTSConfig struct {
+	Enabled  bool   `json:"enabled"`
+	CertFile string `json:"certFile"`
+	KeyFile  string `json:"keyFile"`
+}
+
+type CertificateStore struct {
+	Enabled      bool                   `json:"enabled"`
+	Directory    string                 `json:"directory"`
+	TrustStore   string                 `json:"trustStore"`
+	Authorities  []CertificateAuthority `json:"authorities"`
+	Certificates []ManagedCertificate   `json:"certificates"`
+	LetsEncrypt  ACMEConfig             `json:"letsEncrypt"`
+}
+
+type CertificateAuthority struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	SourceFile string `json:"sourceFile"`
+	PEM        string `json:"pem"`
+	Install    bool   `json:"install"`
+}
+
+type ManagedCertificate struct {
+	ID            string   `json:"id"`
+	Domains       []string `json:"domains"`
+	CertFile      string   `json:"certFile"`
+	KeyFile       string   `json:"keyFile"`
+	ChainFile     string   `json:"chainFile"`
+	FullChainFile string   `json:"fullChainFile"`
+	OwnerService  string   `json:"ownerService"`
+	RenewHook     string   `json:"renewHook"`
+}
+
+type ACMEConfig struct {
+	Enabled      bool              `json:"enabled"`
+	Engine       string            `json:"engine"`
+	Email        string            `json:"email"`
+	DirectoryURL string            `json:"directoryUrl"`
+	Staging      bool              `json:"staging"`
+	Webroot      string            `json:"webroot"`
+	RenewTimer   bool              `json:"renewTimer"`
+	Certificates []ACMECertificate `json:"certificates"`
+}
+
+type ACMECertificate struct {
+	ID          string   `json:"id"`
+	Domains     []string `json:"domains"`
+	Method      string   `json:"method"`
+	Webroot     string   `json:"webroot"`
+	DNSProvider string   `json:"dnsProvider"`
+	KeyType     string   `json:"keyType"`
+	DeployHook  string   `json:"deployHook"`
+	Staging     bool     `json:"staging"`
 }
 
 type PlatformConfig struct {
@@ -547,16 +660,30 @@ func Default() Config {
 			DHCPServer: DHCPServiceConfig{Engine: "dnsmasq"},
 			DHCPClient: DHCPClientConfig{Enabled: true, Interfaces: []string{"enp1s0"}},
 			DNSServer: DNSServiceConfig{
-				Engine:     "dnsmasq",
-				Listen:     []string{"enp2s0"},
-				Forwarders: []string{"1.1.1.1", "9.9.9.9"},
+				Engine:           "dnsmasq",
+				Listen:           []string{"enp2s0"},
+				Forwarders:       []string{"1.1.1.1", "9.9.9.9"},
+				CacheSize:        10000,
+				BindInterfaces:   true,
+				RebindProtection: true,
 			},
 			DNSClient: DNSClientConfig{
-				Enabled:   true,
-				Resolvers: []string{"1.1.1.1", "9.9.9.9"},
+				Enabled:            true,
+				Resolvers:          []string{"1.1.1.1", "9.9.9.9"},
+				FallbackResolvers:  []string{"8.8.8.8"},
+				UseSystemdResolved: true,
 			},
-			NTPServer: NTPServiceConfig{Engine: "chrony", Listen: []string{"enp2s0"}},
-			NTPClient: NTPClientConfig{Enabled: true, Servers: []string{"pool.ntp.org"}},
+			NTPServer: NTPServiceConfig{Engine: "chrony", Listen: []string{"enp2s0"}, LocalStratum: 10},
+			NTPClient: NTPClientConfig{Enabled: true, Pools: []string{"pool.ntp.org"}, Makestep: true},
+			CertificateStore: CertificateStore{
+				Directory:  "/etc/las/certs",
+				TrustStore: "/usr/local/share/ca-certificates",
+				LetsEncrypt: ACMEConfig{
+					Engine:     "certbot",
+					Webroot:    "/var/www/letsencrypt",
+					RenewTimer: true,
+				},
+			},
 		},
 		Platform: PlatformConfig{
 			Access: AccessConfig{

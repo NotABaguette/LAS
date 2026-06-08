@@ -21,8 +21,10 @@ Status legend:
 | VTI / IPsec VTI | done | `ip tunnel mode vti` plus strongSwan policy |
 | VXLAN | done | `ip link type vxlan` |
 | ERSPAN | done | `ip link type erspan` |
-| OpenVPN | partial | `openvpn-client@.service`, full profile renderer TODO |
-| OpenVPN backend | todo | client/server profile renderer, CA/cert generation, CCD, pushed routes/DNS, auth plugins, tun/tap mode, status counters |
+| OpenVPN client/server | partial | client/server profile renderer, auth files, cert refs, pushed routes/DNS, Debian `openvpn-client@`/`openvpn-server@`; CCD/user export/status counters TODO |
+| OpenConnect / AnyConnect | partial | per-tunnel `openconnect` systemd units, protocol selection, password/cookie file auth |
+| GlobalProtect / Pulse Secure | partial | OpenConnect protocol variants rendered through per-tunnel units |
+| FortiGate SSL VPN | partial | `openfortivpn` profile and per-tunnel systemd unit renderer |
 | IPsec IKEv1/IKEv2 | partial | strongSwan, full peer/proposal/secret renderer TODO |
 | L2TP | partial | `xl2tpd`, full PPP profile renderer TODO |
 | L2TP/IPsec | partial | strongSwan plus `xl2tpd`, full renderer TODO |
@@ -41,7 +43,7 @@ Status legend:
 | MPLS/VPLS | todo | FRR/MPLS kernel stack, design required |
 | L2 bridging over VPN | todo | Linux bridge plus GRETAP/VXLAN/L2TPv3 profiles |
 | Road-warrior VPN portal | todo | generated users, certs, QR/config export |
-| Certificate authority | todo | local CA, ACME, strongSwan/OpenVPN cert lifecycle |
+| Certificate authority / SSL cert store | partial | trusted CA installation, managed cert metadata, certbot/Let's Encrypt ACME issue/renew hooks; local CA generation TODO |
 | Inbound/outbound tunnel mode | partial | direction is modeled; full server/client templates TODO |
 
 ## RouterOS-Style Feature Backlog
@@ -56,7 +58,7 @@ Status legend:
 | Bonding/LACP | todo | `ip link type bond` |
 | VRRP | todo | keepalived integration |
 | DHCP client | partial | service model and interface `dhcp`; renderer TODO |
-| DHCP server | partial | service model plus baseline dnsmasq profile |
+| DHCP server | partial | dnsmasq ranges, static leases, lease file, authoritative mode, and DHCP options; Kea renderer TODO |
 | IPv6 SLAAC/DHCPv6/PD | todo | systemd-networkd/Kea integration |
 
 ### Routing
@@ -109,7 +111,7 @@ Status legend:
 | --- | --- | --- |
 | IPS | partial | Suricata AF_PACKET/NFQUEUE service integration |
 | Antivirus | partial | ClamAV proxy/ICAP profile; transparent TLS scanning is not possible |
-| DNS filtering | partial | dnsmasq profile skeleton |
+| DNS filtering | partial | dnsmasq filtering profile plus DNS server route hooks; feed-to-DNS policy pipeline TODO |
 | Threat feeds | todo | managed nft sets and Suricata rules |
 | IDS dashboards | todo | event ingestion and UI |
 | Captive portal / hotspot | todo | CoovaChilli/openNDS or custom portal |
@@ -125,8 +127,8 @@ Status legend:
 | Diagnostics | partial | ping, traceroute, curl-head, dig, and route lookup API/UI |
 | Traffic statistics dashboard | todo | live RX/TX, packets, drops, errors, per tunnel, per app, per rule, historical charts |
 | Usage accounting database | todo | persistent time-series store for interface/tunnel/rule/app counters and quota resets |
-| DNS server/client | partial | service model plus baseline dnsmasq/resolver config |
-| NTP server/client | partial | service model plus baseline chrony config |
+| DNS server/client | partial | dnsmasq, unbound, BIND include, systemd-resolved, resolv.conf, records, overrides, conditional forwarders; full BIND zone generation TODO |
+| NTP server/client | done | chrony/ntpsec renderers, pools/servers/peers/fallbacks, LAN allow CIDRs, local stratum, chrony NTS settings |
 | MPLS | partial | service model plus FRR warning/enablement |
 | Automatic updates | partial | daily system/core updater for apt, ClamAV, Xray-core, sing-box |
 | Audit log | todo | persistent change and apply history |
@@ -145,7 +147,7 @@ Status legend:
 3. Complete traffic statistics, persistent usage accounting, and quota enforcement for inbound/outbound interfaces, tunnels, VPN users, and app/service route sets.
 4. Complete application/service routing catalog and feed pipeline, including Telegram/WhatsApp examples and custom app feeds.
 5. Complete DHCP, VLAN, bridge, dstnat, address-list, and queue renderers; these are core router features.
-6. Complete strongSwan, OpenVPN backend, WireGuard server, PPP/L2TP/SSTP/PPTP, Xray, and sing-box profile renderers.
+6. Complete strongSwan, WireGuard server, PPP/L2TP/SSTP/PPTP, Xray, and sing-box profile renderers; add OpenVPN/OpenConnect/FortiGate status counters and user export workflows.
 7. Add FRR for BGP/OSPF/RIP/BFD and VRF-aware routing.
 8. Add monitoring dashboards, backup/restore, and safe upgrade workflows.
 

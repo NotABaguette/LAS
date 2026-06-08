@@ -21,6 +21,10 @@ apt-get install -y \
   iptables \
   wireguard-tools \
   openvpn \
+  openconnect \
+  openfortivpn \
+  vpnc-scripts \
+  easy-rsa \
   strongswan \
   xl2tpd \
   frr \
@@ -29,7 +33,10 @@ apt-get install -y \
   clamav-daemon \
   clamav-freshclam \
   dnsmasq \
+  unbound \
+  bind9 \
   chrony \
+  ntpsec \
   snmpd \
   softflowd \
   prometheus-node-exporter \
@@ -43,15 +50,21 @@ apt-get install -y \
   python3 \
   unzip \
   curl \
+  certbot \
   ca-certificates
 
 go build -o lasd ./cmd/lasd
 
 install -d /etc/las
 install -d /etc/default
+install -d /etc/las/certs
 install -d /etc/las/wireguard
+install -d /etc/las/openvpn
+install -d /etc/las/openconnect
+install -d /etc/las/openfortivpn
 install -d /etc/las/xray
 install -d /etc/las/sing-box
+install -d /var/www/letsencrypt
 install -d /var/lib/las
 install -d /usr/share/las/web
 install -m 0755 lasd /usr/local/sbin/lasd

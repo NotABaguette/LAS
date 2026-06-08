@@ -104,6 +104,21 @@ sudo /usr/local/sbin/las-update-cores --dry-run
 go build -o lasd ./cmd/lasd
 ```
 
+## CI/CD
+
+GitHub Actions is configured for maintainability:
+
+- `CI` runs on pushes, pull requests, and manual dispatch. It checks Go formatting, shell/Python syntax, tests, build, example config validation, and dry-run plan generation.
+- `CD` runs on `v*` tags and manual dispatch. It builds Linux release tarballs for `amd64`, `arm64`, and `armv7`; tag runs publish those artifacts to a GitHub Release.
+- Dependabot checks Go modules and GitHub Actions weekly.
+
+Create a release with:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## Roadmap
 
 - Add persistent audit log storage.

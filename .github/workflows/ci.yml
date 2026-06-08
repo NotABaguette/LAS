@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test And Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set Up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check Go Formatting
+        run: |
+          files="$(gofmt -l $(find cmd internal -name '*.go' -type f))"
+          if [ -n "$files" ]; then
+            echo "$files"
+            exit 1
+          fi
+
+      - name: Check Shell Syntax
+        run: bash -n scripts/install.sh scripts/las-update.sh scripts/check-host.sh
+
+      - name: Check Python Syntax
+        run: python3 -m py_compile scripts/update-cores.py
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        run: go build -trimpath -o lasd ./cmd/lasd
+
+      - name: Validate Example Config
+        run: go run ./cmd/lasd --config ./configs/router.example.json --validate
+
+      - name: Generate Example Plan
+        run: go run ./cmd/lasd --config ./configs/router.example.json --plan > /tmp/las-plan.json
+
